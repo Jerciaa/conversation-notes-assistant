@@ -1,144 +1,137 @@
 import express from "express";
-import multer from "multer";
-import bcrypt from "bcryptjs";
-import { requireAuth } from "../middleware/auth.js";
+import { requirePatient } from "../middleware/auth.js";
 import { Patient } from "../models/Patient.js";
 import { Visit } from "../models/Visit.js";
 import { AuditLog } from "../models/AuditLog.js";
-import {
-  transcribeAudioBuffer,
-  generateGroundedSoapNote,
-} from "../services/aiService.js";
 
 const router = express.Router();
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
-});
+router.use(requirePatient);
 
-router.use(requireAuth);
-
-router.get("/patients", async (req, res) => {
+router.get("/dashboard", async (req, res) => {
   try {
-    const patients = await Patient.find({}).select("-passwordHash").sort({ patientCode: 1 });
-    res.json({ patients });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post("/patients", async (req, res) => {
-  try {
-    const { name, patientCode, age, gender, email, password, phone } = req.body;
-    if (!name || !patientCode) {
-      return res.status(400).json({ error: "Patient name and code are required" });
+    const patient = await Patient.findById(req.patientId).select("-passwordHash");
+    if (!patient) {
+      return res.status(404).json({ error: "Patient profile not found" });
     }
 
-    const normalizedCode = patientCode.trim().toUpperCase();
-    const existingByCode = await Patient.findOne({ patientCode: normalizedCode });
-
-    const passwordHash = password ? await bcrypt.hash(password, 10) : undefined;
-    const normalizedEmail = email ? email.toLowerCase().trim() : undefined;
-
-    if (existingByCode) {
-      if (normalizedEmail) existingByCode.email = normalizedEmail;
-      if (passwordHash) existingByCode.passwordHash = passwordHash;
-      if (phone !== undefined) existingByCode.phone = phone;
-      await existingByCode.save();
-      const sanitized = existingByCode.toObject();
-      delete sanitized.passwordHash;
-      return res.json({ patient: sanitized });
-    }
-
-    const patient = await Patient.create({
-      name: name.trim(),
-      patientCode: normalizedCode,
-      age: age ? Number(age) : undefined,
-      gender: gender || "",
-      email: normalizedEmail,
-      passwordHash,
-      phone: phone || "",
-    });
-
-    const sanitized = patient.toObject();
-    delete sanitized.passwordHash;
-    res.status(201).json({ patient: sanitized });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get("/", async (req, res) => {
-  try {
-    const visits = await Visit.find({ providerId: req.providerId })
-      .populate("patientId", "-passwordHash")
+    const visits = await Visit.find({
+      patientId: req.patientId,
+      consentStatus: { $ne: "WITHDRAWN" },
+    })
+      .populate("providerId", "name specialty email")
       .sort({ createdAt: -1 });
-    res.json({ visits });
+
+    const callLogs = visits.map((v) => ({
+      id: v._id,
+      date: v.createdAt,
+      visitType: v.visitType,
+      status: v.status,
+      consentStatus: v.consentStatus,
+      doctorName: v.providerId?.name || "Clinic Provider",
+      doctorSpecialty: v.providerId?.specialty || "General Practice",
+      webrtcOffer:
+        v.status === "CALL_RINGING" || v.status === "IN_CALL" ? v.webrtcOffer : null,
+      providerIceCandidates:
+        v.status === "CALL_RINGING" || v.status === "IN_CALL"
+          ? v.providerIceCandidates || []
+          : [],
+      summary:
+        v.patientSummary ||
+        (v.status === "APPROVED" || v.status === "DRAFT_READY"
+          ? "Consultation completed. Summary is being prepared by your provider."
+          : v.status === "CALL_RINGING"
+          ? "Incoming consultation call from your doctor — answer and approve consent to begin."
+          : v.status === "IN_CALL"
+          ? "Live voice consultation call in progress with your doctor."
+          : "Consultation scheduled — consent active."),
+      nextAppointment: v.nextAppointment || "",
+    }));
+
+    const appointments = callLogs
+      .filter(
+        (item) =>
+          item.nextAppointment &&
+          item.nextAppointment !== "No follow-up appointment scheduled yet"
+      )
+      .map((item) => ({
+        id: item.id,
+        doctorName: item.doctorName,
+        doctorSpecialty: item.doctorSpecialty,
+        visitType: item.visitType,
+        appointmentDetails: item.nextAppointment,
+        recordedOn: item.date,
+      }));
+
+    res.json({
+      patient,
+      callLogs,
+      appointments,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post("/", async (req, res) => {
+router.post("/availability", async (req, res) => {
   try {
-    const { patientId, visitType } = req.body;
-    const patient = await Patient.findById(patientId);
+    const { availabilityStatus, availabilityNote } = req.body;
+    const patient = await Patient.findByIdAndUpdate(
+      req.patientId,
+      {
+        availabilityStatus: availabilityStatus || "AVAILABLE_NOW",
+        availabilityNote: (availabilityNote || "").trim(),
+        availabilityUpdatedAt: new Date(),
+      },
+      { new: true }
+    ).select("-passwordHash");
+
     if (!patient) {
       return res.status(404).json({ error: "Patient not found" });
     }
 
-    const visit = await Visit.create({
-      providerId: req.providerId,
-      patientId: patient._id,
-      visitType: visitType || "Primary Care Follow-up",
-      consentStatus: "PENDING",
-      status: "CONSENT_REQUIRED",
-    });
-
-    const populated = await Visit.findById(visit._id).populate("patientId", "-passwordHash");
-    res.status(201).json({ visit: populated });
+    res.json({ patient });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post("/:id/call/start", async (req, res) => {
+router.post("/visits/:id/answer", async (req, res) => {
   try {
-    const { offer } = req.body;
-    const visit = await Visit.findOneAndUpdate(
-      { _id: req.params.id, providerId: req.providerId },
-      {
-        status: "CALL_RINGING",
-        callStartedAt: new Date(),
-        webrtcOffer: offer || null,
-        webrtcAnswer: null,
-        providerIceCandidates: [],
-        patientIceCandidates: [],
-      },
-      { new: true }
-    ).populate("patientId", "-passwordHash");
+    const { answer } = req.body;
+    const visit = await Visit.findOne({
+      _id: req.params.id,
+      patientId: req.patientId,
+    }).populate("patientId", "-passwordHash");
 
     if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
+      return res.status(404).json({ error: "Consultation not found" });
     }
+
+    visit.consentStatus = "GRANTED";
+    visit.consentGrantedAt = new Date();
+    visit.status = "IN_CALL";
+    if (answer) {
+      visit.webrtcAnswer = answer;
+    }
+    await visit.save();
 
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
     await AuditLog.create({
-      providerId: req.providerId,
+      providerId: visit.providerId,
       visitId: visit._id.toString(),
       patientName: patientLabel,
-      action: "CALL_INITIATED",
-      details: `Provider initiated live voice call to ${patientLabel}`,
+      action: "CONSENT_GRANTED",
+      details: `Patient ${patientLabel} answered live voice call and approved consent`,
     });
 
-    res.json({ visit });
+    res.json({ answered: true, visitId: visit._id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post("/:id/call/ice", async (req, res) => {
+router.post("/visits/:id/call/ice", async (req, res) => {
   try {
     const { candidate } = req.body;
     if (!candidate) {
@@ -146,13 +139,13 @@ router.post("/:id/call/ice", async (req, res) => {
     }
 
     const visit = await Visit.findOneAndUpdate(
-      { _id: req.params.id, providerId: req.providerId },
-      { $push: { providerIceCandidates: candidate } },
+      { _id: req.params.id, patientId: req.patientId },
+      { $push: { patientIceCandidates: candidate } },
       { new: true }
     );
 
     if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
+      return res.status(404).json({ error: "Consultation not found" });
     }
 
     res.json({ ok: true });
@@ -161,172 +154,18 @@ router.post("/:id/call/ice", async (req, res) => {
   }
 });
 
-router.post("/:id/call/hangup", async (req, res) => {
-  try {
-    const visit = await Visit.findOneAndUpdate(
-      { _id: req.params.id, providerId: req.providerId },
-      {
-        status: "READY_TO_RECORD",
-        webrtcOffer: null,
-        webrtcAnswer: null,
-        providerIceCandidates: [],
-        patientIceCandidates: [],
-      },
-      { new: true }
-    ).populate("patientId", "-passwordHash");
-
-    if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
-    }
-
-    res.json({ visit });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post("/:id/call/end", async (req, res) => {
-  try {
-    const visit = await Visit.findOneAndUpdate(
-      { _id: req.params.id, providerId: req.providerId },
-      {
-        webrtcOffer: null,
-        webrtcAnswer: null,
-        providerIceCandidates: [],
-        patientIceCandidates: [],
-      },
-      { new: true }
-    ).populate("patientId", "-passwordHash");
-
-    if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
-    }
-
-    res.json({ visit });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post("/:id/consent/grant", async (req, res) => {
-  try {
-    const visit = await Visit.findOneAndUpdate(
-      { _id: req.params.id, providerId: req.providerId },
-      {
-        consentStatus: "GRANTED",
-        consentGrantedAt: new Date(),
-        status: "IN_CALL",
-      },
-      { new: true }
-    ).populate("patientId", "-passwordHash");
-
-    if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
-    }
-
-    const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
-    await AuditLog.create({
-      providerId: req.providerId,
-      visitId: visit._id.toString(),
-      patientName: patientLabel,
-      action: "CONSENT_GRANTED",
-      details: `Explicit patient consent granted for ${visit.visitType}`,
-    });
-
-    res.json({ visit });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post("/:id/consent/withdraw", async (req, res) => {
+router.post("/visits/:id/decline", async (req, res) => {
   try {
     const visit = await Visit.findOne({
       _id: req.params.id,
-      providerId: req.providerId,
-    }).populate("patientId");
+      patientId: req.patientId,
+    }).populate("patientId", "-passwordHash");
 
     if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
+      return res.status(404).json({ error: "Consultation not found" });
     }
 
-    const visitIdStr = visit._id.toString();
-    const patientLabel = visit.patientId
-      ? `${visit.patientId.name} (${visit.patientId.patientCode})`
-      : "Unknown Patient";
-
-    await Visit.deleteOne({ _id: visit._id, providerId: req.providerId });
-    await AuditLog.deleteMany({ visitId: visitIdStr, providerId: req.providerId });
-
-    await AuditLog.create({
-      providerId: req.providerId,
-      visitId: visitIdStr,
-      patientName: patientLabel,
-      action: "CONSENT_WITHDRAWN_PURGED",
-      details: "Patient withdrew consent; clinical transcript and SOAP draft purged",
-    });
-
-    res.json({ purged: true, visitId: visitIdStr });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
-  const startTime = Date.now();
-  try {
-    const visit = await Visit.findOne({
-      _id: req.params.id,
-      providerId: req.providerId,
-    }).populate("patientId");
-
-    if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
-    }
-    if (visit.consentStatus !== "GRANTED") {
-      return res.status(403).json({
-        error: "Explicit patient consent required before processing audio.",
-      });
-    }
-
-    let transcript = req.body.manualTranscript?.trim() || "";
-    if (!transcript && req.file) {
-      transcript = await transcribeAudioBuffer(
-        req.file.buffer,
-        req.file.mimetype
-      );
-    }
-    if (!transcript) {
-      return res
-        .status(400)
-        .json({ error: "No audio file or transcript provided." });
-    }
-
-    transcript = transcript
-      .replace(/\bSpeaker\s*0\b/gi, "Speaker 1")
-      .replace(/\bSpeaker\s*1\b/gi, "Speaker 1")
-      .replace(/\bSpeaker\s*2\b/gi, "Speaker 2");
-
-    const generated = await generateGroundedSoapNote({
-      transcript,
-      patient: visit.patientId,
-      visitType: visit.visitType,
-    });
-
-    const generationTimeMs = Date.now() - startTime;
-    const soapPayload = generated.soapDraft || generated.soapNote || generated;
-
-    visit.transcript = transcript;
-    visit.speakerMapping = generated.speakerMapping || {
-      Speaker1: "Provider",
-      Speaker2: "Patient",
-    };
-    visit.soapDraft = soapPayload;
-    visit.soapFinal = soapPayload;
-    visit.patientSummary = generated.patientSummary || "";
-    visit.nextAppointment = generated.nextAppointment || "";
-    visit.generationTimeMs = generationTimeMs;
-    visit.status = "DRAFT_READY";
+    visit.status = "CONSENT_REQUIRED";
     visit.webrtcOffer = null;
     visit.webrtcAnswer = null;
     visit.providerIceCandidates = [];
@@ -335,75 +174,75 @@ router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
 
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
     await AuditLog.create({
-      providerId: req.providerId,
+      providerId: visit.providerId,
       visitId: visit._id.toString(),
       patientName: patientLabel,
-      action: soapPayload.isFallback
-        ? "AI_FALLBACK_TRIGGERED"
-        : "SOAP_DRAFT_GENERATED",
-      details: `Grounded SOAP draft generated in ${(generationTimeMs / 1000).toFixed(1)}s`,
+      action: "CALL_DECLINED",
+      details: `Patient ${patientLabel} declined the incoming call without withdrawing consent`,
     });
 
-    res.json({ visit });
+    res.json({ declined: true, visitId: visit._id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-async function handleReview(req, res) {
+router.post("/visits/:id/hangup", async (req, res) => {
   try {
-    const { soapNote, soapFinal, patientSummary, nextAppointment, approve, decision } = req.body;
-    const updatedFields = soapFinal || soapNote;
-    const isApproved = approve || decision === "APPROVED";
-
     const visit = await Visit.findOne({
       _id: req.params.id,
-      providerId: req.providerId,
-    }).populate("patientId", "-passwordHash");
-
-    if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
-    }
-
-    if (updatedFields) {
-      const currentFinal =
-        typeof visit.soapFinal?.toObject === "function"
-          ? visit.soapFinal.toObject()
-          : visit.soapFinal || {};
-      visit.soapFinal = { ...currentFinal, ...updatedFields };
-      visit.wasEditedByProvider = true;
-      visit.providerEdited = true;
-    }
-    if (patientSummary !== undefined) {
-      visit.patientSummary = patientSummary;
-    }
-    if (nextAppointment !== undefined) {
-      visit.nextAppointment = nextAppointment;
-    }
-    if (isApproved) {
-      visit.status = "APPROVED";
-    }
-
-    await visit.save();
-
-    const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
-    await AuditLog.create({
-      providerId: req.providerId,
-      visitId: visit._id.toString(),
-      patientName: patientLabel,
-      action: isApproved ? "SOAP_APPROVED" : "SOAP_EDITED",
-      details: isApproved
-        ? `Provider approved SOAP note for ${patientLabel}`
-        : `Provider edited SOAP draft for ${patientLabel}`,
+      patientId: req.patientId,
     });
 
-    res.json({ visit });
+    if (!visit) {
+      return res.status(404).json({ error: "Consultation not found" });
+    }
+
+    visit.status = "READY_TO_RECORD";
+    visit.webrtcOffer = null;
+    visit.webrtcAnswer = null;
+    visit.providerIceCandidates = [];
+    visit.patientIceCandidates = [];
+    await visit.save();
+
+    res.json({ hungUp: true, visitId: visit._id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-}
+});
 
-router.post("/:id/review", handleReview);
-router.patch("/:id/review", handleReview);
+router.post("/visits/:id/consent/withdraw", async (req, res) => {
+  try {
+    const visit = await Visit.findOne({
+      _id: req.params.id,
+      patientId: req.patientId,
+    }).populate("patientId");
+
+    if (!visit) {
+      return res.status(404).json({ error: "Consultation not found" });
+    }
+
+    const visitIdStr = visit._id.toString();
+    const providerId = visit.providerId;
+    const patientLabel = visit.patientId
+      ? `${visit.patientId.name} (${visit.patientId.patientCode})`
+      : "Unknown Patient";
+
+    await Visit.deleteOne({ _id: visit._id, patientId: req.patientId });
+    await AuditLog.deleteMany({ visitId: visitIdStr, providerId });
+
+    await AuditLog.create({
+      providerId,
+      visitId: visitIdStr,
+      patientName: patientLabel,
+      action: "CONSENT_WITHDRAWN_PURGED",
+      details: `Patient ${patientLabel} withdrew consent from Patient Portal; data purged`,
+    });
+
+    res.json({ purged: true, visitId: visitIdStr });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default router;
