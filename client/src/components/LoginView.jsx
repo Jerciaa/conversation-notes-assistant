@@ -1,22 +1,37 @@
 import { useState } from "react";
 import { apiRequest } from "../api";
 
+const DEMO_DOCTORS = [
+  {
+    name: "Dr. Anjali Rao",
+    specialty: "Primary Care",
+    email: "dr.anjali@clinic.demo",
+    password: "DemoPass123!",
+  },
+  {
+    name: "Dr. Vikram Nair",
+    specialty: "Internal Medicine",
+    email: "dr.vikram@clinic.demo",
+    password: "DemoPass123!",
+  },
+];
+
 const DEMO_PATIENTS = [
-  { code: "PAT-101", name: "Elena Vance", email: "elena.vance@patient.demo" },
-  { code: "PAT-102", name: "Marcus Sterling", email: "marcus.sterling@patient.demo" },
-  { code: "PAT-103", name: "Priya Nair", email: "priya.nair@patient.demo" },
-  { code: "PAT-104", name: "David Okafor", email: "david.okafor@patient.demo" },
-  { code: "PAT-105", name: "Sofia Alvarez", email: "sofia.alvarez@patient.demo" },
-  { code: "PAT-106", name: "Liam Chen", email: "liam.chen@patient.demo" },
+  { code: "PAT-101", name: "Rahul Sharma", email: "rahul.sharma@patient.demo", password: "DemoPass123!" },
+  { code: "PAT-102", name: "Meera Krishnan", email: "meera.krishnan@patient.demo", password: "DemoPass123!" },
+  { code: "PAT-103", name: "Arjun Menon", email: "arjun.menon@patient.demo", password: "DemoPass123!" },
+  { code: "PAT-104", name: "Priya Nair", email: "priya.nair@patient.demo", password: "DemoPass123!" },
+  { code: "PAT-105", name: "Suresh Iyer", email: "suresh.iyer@patient.demo", password: "DemoPass123!" },
+  { code: "PAT-106", name: "Kavita Desai", email: "kavita.desai@patient.demo", password: "DemoPass123!" },
 ];
 
 export default function LoginView({ onAuthSuccess }) {
   const [portalRole, setPortalRole] = useState("clinician");
   const [mode, setMode] = useState("login");
-  const [email, setEmail] = useState("dr.arjun@clinic.demo");
-  const [password, setPassword] = useState("DemoPass123!");
-  const [name, setName] = useState("Dr. Arjun Mehta");
-  const [specialty, setSpecialty] = useState("Internal Medicine");
+  const [email, setEmail] = useState(DEMO_DOCTORS[0].email);
+  const [password, setPassword] = useState(DEMO_DOCTORS[0].password);
+  const [name, setName] = useState("Dr. Anjali Rao");
+  const [specialty, setSpecialty] = useState("Primary Care");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -24,12 +39,12 @@ export default function LoginView({ onAuthSuccess }) {
     setPortalRole(role);
     setError("");
     if (role === "clinician") {
-      setEmail("dr.arjun@clinic.demo");
-      setPassword("DemoPass123!");
+      setEmail(DEMO_DOCTORS[0].email);
+      setPassword(DEMO_DOCTORS[0].password);
     } else {
       setMode("login");
-      setEmail("elena.vance@patient.demo");
-      setPassword("DemoPass123!");
+      setEmail(DEMO_PATIENTS[0].email);
+      setPassword(DEMO_PATIENTS[0].password);
     }
   }
 
@@ -88,7 +103,7 @@ export default function LoginView({ onAuthSuccess }) {
         className="auth-card"
         style={{
           width: "100%",
-          maxWidth: "430px",
+          maxWidth: "460px",
           background: "#ffffff",
           borderRadius: "16px",
           padding: "2rem",
@@ -267,51 +282,72 @@ export default function LoginView({ onAuthSuccess }) {
           </button>
         </form>
 
-        {portalRole === "patient" ? (
+        <div
+          style={{
+            marginTop: "1.25rem",
+            paddingTop: "1rem",
+            borderTop: "1px solid #e2e8f0",
+          }}
+        >
           <div
             style={{
-              marginTop: "1.25rem",
-              paddingTop: "1rem",
-              borderTop: "1px solid #e2e8f0",
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: "0.45rem",
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: "0.4rem",
-                justifyContent: "center",
-              }}
-            >
-              {DEMO_PATIENTS.map((p) => (
-                <button
-                  key={p.code}
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => {
-                    setEmail(p.email);
-                    setPassword("DemoPass123!");
-                  }}
-                >
-                  {p.name}
-                </button>
-              ))}
-            </div>
+            {portalRole === "clinician"
+              ? DEMO_DOCTORS.map((doc) => (
+                  <button
+                    key={doc.email}
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => {
+                      setMode("login");
+                      setEmail(doc.email);
+                      setPassword(doc.password);
+                    }}
+                    style={{
+                      textAlign: "left",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      padding: "0.45rem 0.6rem",
+                    }}
+                  >
+                    <strong style={{ fontSize: "0.82rem" }}>{doc.name}</strong>
+                    <span style={{ fontSize: "0.74rem", color: "#64748b" }}>
+                      {doc.email}
+                    </span>
+                  </button>
+                ))
+              : DEMO_PATIENTS.map((p) => (
+                  <button
+                    key={p.code}
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => {
+                      setEmail(p.email);
+                      setPassword(p.password);
+                    }}
+                    style={{
+                      textAlign: "left",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      padding: "0.45rem 0.6rem",
+                    }}
+                  >
+                    <strong style={{ fontSize: "0.82rem" }}>
+                      {p.code}: {p.name}
+                    </strong>
+                    <span style={{ fontSize: "0.74rem", color: "#64748b" }}>
+                      {p.email}
+                    </span>
+                  </button>
+                ))}
           </div>
-        ) : (
-          <div
-            style={{
-              marginTop: "1.25rem",
-              paddingTop: "0.85rem",
-              borderTop: "1px solid #e2e8f0",
-              textAlign: "center",
-              fontSize: "0.85rem",
-              color: "#64748b",
-            }}
-          >
-            <code>dr.arjun@clinic.demo</code>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );
