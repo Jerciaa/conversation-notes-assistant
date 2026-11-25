@@ -1,11 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { apiRequest } from "../api";
+
+const ICE_SERVERS = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
 
 export default function PatientPortal({ token, patient, onLogout }) {
   const [data, setData] = useState({ patient: patient || {}, callLogs: [], appointments: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
+  const [callConnected, setCallConnected] = useState(false);
 
   const [availabilityStatus, setAvailabilityStatus] = useState(
     patient?.availabilityStatus || "AVAILABLE_NOW"
@@ -14,6 +19,11 @@ export default function PatientPortal({ token, patient, onLogout }) {
     patient?.availabilityNote || ""
   );
   const [savingAvailability, setSavingAvailability] = useState(false);
+
+  const peerRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteAudioRef = useRef(null);
+  const appliedProviderIceCountRef = useRef(0);
 
   async function loadPortal(silent = false) {
     if (!silent) setLoading(true);
@@ -32,13 +42,61 @@ export default function PatientPortal({ token, patient, onLogout }) {
     }
   }
 
+  function cleanupCallResources() {
+    if (peerRef.current) {
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
+    }
+    appliedProviderIceCountRef.current = 0;
+    setCallConnected(false);
+  }
+
   useEffect(() => {
     loadPortal(false);
     const interval = setInterval(() => {
       loadPortal(true);
-    }, 3000);
-    return () => clearInterval(interval);
+    }, 2500);
+    return () => {
+      clearInterval(interval);
+      cleanupCallResources();
+    };
   }, [token]);
+
+  const profile = data.patient || patient || {};
+  const incomingCalls = data.callLogs.filter(
+    (log) => log.status === "CALL_RINGING" || (log.status === "CONSENT_REQUIRED" && log.consentStatus === "PENDING")
+  );
+  const activeCalls = data.callLogs.filter((log) => log.status === "IN_CALL");
+  const currentActiveCall = activeCalls[0] || null;
+
+  useEffect(() => {
+    if (!currentActiveCall) {
+      if (peerRef.current) cleanupCallResources();
+      return;
+    }
+
+    async function syncProviderIce() {
+      const pc = peerRef.current;
+      if (!pc) return;
+      const candidates = currentActiveCall.providerIceCandidates || [];
+      if (candidates.length > appliedProviderIceCountRef.current) {
+        for (let i = appliedProviderIceCountRef.current; i < candidates.length; i += 1) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidates[i]));
+          } catch (err) {
+            console.error("Error adding provider ICE candidate:", err);
+          }
+        }
+        appliedProviderIceCountRef.current = candidates.length;
+      }
+    }
+
+    syncProviderIce();
+  }, [currentActiveCall]);
 
   async function handleSendAvailability(e) {
     e.preventDefault();
@@ -63,15 +121,73 @@ export default function PatientPortal({ token, patient, onLogout }) {
     }
   }
 
-  async function handleAnswerCall(visitId) {
+  async function handleAnswerCall(call) {
     setError("");
-    setStatusMessage("");
+    setStatusMessage("Connecting live audio and approving consent...");
     try {
-      await apiRequest(`/api/patient-portal/visits/${visitId}/answer`, { method: "POST" }, token);
-      setStatusMessage("Call answered and consent approved. You can now speak with your consultant.");
+      cleanupCallResources();
+      let answerPayload = null;
+
+      if (call.webrtcOffer) {
+        const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localStreamRef.current = localStream;
+
+        const pc = new RTCPeerConnection(ICE_SERVERS);
+        peerRef.current = pc;
+
+        localStream.getTracks().forEach((track) => {
+          pc.addTrack(track, localStream);
+        });
+
+        pc.ontrack = (event) => {
+          const [stream] = event.streams;
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = stream;
+            remoteAudioRef.current.play().catch(() => {});
+          }
+          setCallConnected(true);
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            apiRequest(
+              `/api/patient-portal/visits/${call.id}/call/ice`,
+              {
+                method: "POST",
+                body: JSON.stringify({ candidate: event.candidate.toJSON() }),
+              },
+              token
+            ).catch(() => {});
+          }
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(call.webrtcOffer));
+
+        const initialCandidates = call.providerIceCandidates || [];
+        for (let i = 0; i < initialCandidates.length; i += 1) {
+          await pc.addIceCandidate(new RTCIceCandidate(initialCandidates[i])).catch(() => {});
+        }
+        appliedProviderIceCountRef.current = initialCandidates.length;
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        answerPayload = pc.localDescription;
+        setCallConnected(true);
+      }
+
+      await apiRequest(
+        `/api/patient-portal/visits/${call.id}/answer`,
+        {
+          method: "POST",
+          body: JSON.stringify({ answer: answerPayload }),
+        },
+        token
+      );
+      setStatusMessage("Live voice call connected and consent approved. Speak naturally with your consultant.");
       await loadPortal(true);
     } catch (err) {
-      setError(err.message);
+      cleanupCallResources();
+      setError("Could not answer call: " + err.message);
     }
   }
 
@@ -79,6 +195,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
     setError("");
     setStatusMessage("");
     try {
+      cleanupCallResources();
       await apiRequest(`/api/patient-portal/visits/${visitId}/decline`, { method: "POST" }, token);
       setStatusMessage("Incoming call declined. Your consultation remains scheduled.");
       await loadPortal(true);
@@ -96,6 +213,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
     setError("");
     setStatusMessage("");
     try {
+      cleanupCallResources();
       await apiRequest(
         `/api/patient-portal/visits/${visitId}/consent/withdraw`,
         { method: "POST" },
@@ -108,14 +226,10 @@ export default function PatientPortal({ token, patient, onLogout }) {
     }
   }
 
-  const profile = data.patient || patient || {};
-  const incomingCalls = data.callLogs.filter(
-    (log) => log.status === "CALL_RINGING" || (log.status === "CONSENT_REQUIRED" && log.consentStatus === "PENDING")
-  );
-  const activeCalls = data.callLogs.filter((log) => log.status === "IN_CALL");
-
   return (
     <div className="app-shell">
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
+
       <header className="topbar">
         <div className="brand-area">
           <strong>Patient Care Portal</strong>
@@ -151,20 +265,20 @@ export default function PatientPortal({ token, patient, onLogout }) {
           >
             <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
               <span className="pill pill-blue">
-                {call.status === "CALL_RINGING" ? "Incoming Consultation Call" : "Consent Requested"}
+                {call.status === "CALL_RINGING" ? "Incoming Live Voice Call" : "Consent Requested"}
               </span>
             </div>
             <h2 style={{ marginTop: 0 }}>
-              {call.doctorName} ({call.doctorSpecialty}) is ready for your {call.visitType}
+              {call.doctorName} ({call.doctorSpecialty}) is calling for your {call.visitType}
             </h2>
             <p style={{ marginBottom: "1rem" }}>
-              By answering this consultation call, you grant explicit consent for in-memory clinical transcription and After-Visit Summary generation (zero raw audio is stored).
+              Answering connects your microphone and speaker for a live consultation call and grants explicit consent for in-memory clinical transcription (zero raw audio is stored).
             </p>
             <div className="consent-actions">
               <button
                 type="button"
                 className="btn btn-success"
-                onClick={() => handleAnswerCall(call.id)}
+                onClick={() => handleAnswerCall(call)}
               >
                 Answer Call &amp; Approve Consent
               </button>
@@ -200,12 +314,16 @@ export default function PatientPortal({ token, patient, onLogout }) {
           >
             <div className="header-split">
               <div>
-                <span className="pill pill-green">Connected — Live Consultation In Progress</span>
+                <span className="pill pill-green">
+                  {callConnected
+                    ? "Connected — Live Two-Way Audio Active"
+                    : "In Call — Consent Active"}
+                </span>
                 <h2 style={{ marginTop: "0.5rem", marginBottom: "0.25rem" }}>
                   Speaking with {call.doctorName} ({call.doctorSpecialty})
                 </h2>
                 <p className="subtitle" style={{ marginBottom: 0 }}>
-                  Consent is active. Your consultant is capturing the consultation summary.
+                  Your microphone is live and you can hear your consultant directly through your speakers.
                 </p>
               </div>
               <button

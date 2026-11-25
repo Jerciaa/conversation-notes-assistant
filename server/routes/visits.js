@@ -105,11 +105,16 @@ router.post("/", async (req, res) => {
 
 router.post("/:id/call/start", async (req, res) => {
   try {
+    const { offer } = req.body;
     const visit = await Visit.findOneAndUpdate(
       { _id: req.params.id, providerId: req.providerId },
       {
         status: "CALL_RINGING",
         callStartedAt: new Date(),
+        webrtcOffer: offer || null,
+        webrtcAnswer: null,
+        providerIceCandidates: [],
+        patientIceCandidates: [],
       },
       { new: true }
     ).populate("patientId", "-passwordHash");
@@ -124,8 +129,54 @@ router.post("/:id/call/start", async (req, res) => {
       visitId: visit._id.toString(),
       patientName: patientLabel,
       action: "CALL_INITIATED",
-      details: `Provider initiated consultation call to ${patientLabel}`,
+      details: `Provider initiated live voice call to ${patientLabel}`,
     });
+
+    res.json({ visit });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/:id/call/ice", async (req, res) => {
+  try {
+    const { candidate } = req.body;
+    if (!candidate) {
+      return res.status(400).json({ error: "ICE candidate required" });
+    }
+
+    const visit = await Visit.findOneAndUpdate(
+      { _id: req.params.id, providerId: req.providerId },
+      { $push: { providerIceCandidates: candidate } },
+      { new: true }
+    );
+
+    if (!visit) {
+      return res.status(404).json({ error: "Visit not found" });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/:id/call/end", async (req, res) => {
+  try {
+    const visit = await Visit.findOneAndUpdate(
+      { _id: req.params.id, providerId: req.providerId },
+      {
+        webrtcOffer: null,
+        webrtcAnswer: null,
+        providerIceCandidates: [],
+        patientIceCandidates: [],
+      },
+      { new: true }
+    ).populate("patientId", "-passwordHash");
+
+    if (!visit) {
+      return res.status(404).json({ error: "Visit not found" });
+    }
 
     res.json({ visit });
   } catch (err) {
@@ -247,6 +298,10 @@ router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
     visit.nextAppointment = generated.nextAppointment || "";
     visit.generationTimeMs = generationTimeMs;
     visit.status = "DRAFT_READY";
+    visit.webrtcOffer = null;
+    visit.webrtcAnswer = null;
+    visit.providerIceCandidates = [];
+    visit.patientIceCandidates = [];
     await visit.save();
 
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;

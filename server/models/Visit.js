@@ -39,6 +39,22 @@ const visitSchema = new mongoose.Schema(
     callStartedAt: {
       type: Date,
     },
+    webrtcOffer: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    webrtcAnswer: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    providerIceCandidates: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+    },
+    patientIceCandidates: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+    },
     transcript: {
       type: String,
       default: "",

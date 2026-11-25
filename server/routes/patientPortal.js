@@ -30,6 +30,12 @@ router.get("/dashboard", async (req, res) => {
       consentStatus: v.consentStatus,
       doctorName: v.providerId?.name || "Clinic Provider",
       doctorSpecialty: v.providerId?.specialty || "General Practice",
+      webrtcOffer:
+        v.status === "CALL_RINGING" || v.status === "IN_CALL" ? v.webrtcOffer : null,
+      providerIceCandidates:
+        v.status === "CALL_RINGING" || v.status === "IN_CALL"
+          ? v.providerIceCandidates || []
+          : [],
       summary:
         v.patientSummary ||
         (v.status === "APPROVED" || v.status === "DRAFT_READY"
@@ -37,7 +43,7 @@ router.get("/dashboard", async (req, res) => {
           : v.status === "CALL_RINGING"
           ? "Incoming consultation call from your doctor — answer and approve consent to begin."
           : v.status === "IN_CALL"
-          ? "Consultation call in progress with your doctor."
+          ? "Live voice consultation call in progress with your doctor."
           : "Consultation scheduled — awaiting consent or call."),
       nextAppointment: v.nextAppointment || "",
     }));
@@ -92,6 +98,7 @@ router.post("/availability", async (req, res) => {
 
 router.post("/visits/:id/answer", async (req, res) => {
   try {
+    const { answer } = req.body;
     const visit = await Visit.findOne({
       _id: req.params.id,
       patientId: req.patientId,
@@ -104,6 +111,9 @@ router.post("/visits/:id/answer", async (req, res) => {
     visit.consentStatus = "GRANTED";
     visit.consentGrantedAt = new Date();
     visit.status = "IN_CALL";
+    if (answer) {
+      visit.webrtcAnswer = answer;
+    }
     await visit.save();
 
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
@@ -112,10 +122,33 @@ router.post("/visits/:id/answer", async (req, res) => {
       visitId: visit._id.toString(),
       patientName: patientLabel,
       action: "CONSENT_GRANTED",
-      details: `Patient ${patientLabel} answered call and approved consent from Patient Portal`,
+      details: `Patient ${patientLabel} answered live voice call and approved consent`,
     });
 
     res.json({ answered: true, visitId: visit._id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/visits/:id/call/ice", async (req, res) => {
+  try {
+    const { candidate } = req.body;
+    if (!candidate) {
+      return res.status(400).json({ error: "ICE candidate required" });
+    }
+
+    const visit = await Visit.findOneAndUpdate(
+      { _id: req.params.id, patientId: req.patientId },
+      { $push: { patientIceCandidates: candidate } },
+      { new: true }
+    );
+
+    if (!visit) {
+      return res.status(404).json({ error: "Consultation not found" });
+    }
+
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -133,6 +166,10 @@ router.post("/visits/:id/decline", async (req, res) => {
     }
 
     visit.status = "CONSENT_REQUIRED";
+    visit.webrtcOffer = null;
+    visit.webrtcAnswer = null;
+    visit.providerIceCandidates = [];
+    visit.patientIceCandidates = [];
     await visit.save();
 
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
