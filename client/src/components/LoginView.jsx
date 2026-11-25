@@ -25,13 +25,10 @@ const DEMO_PATIENTS = [
   { code: "PAT-106", name: "Kavita Desai", email: "kavita.desai@patient.demo", password: "DemoPass123!" },
 ];
 
-export default function LoginView({ onAuthSuccess }) {
+export default function LoginView({ onLogin }) {
   const [portalRole, setPortalRole] = useState("clinician");
-  const [mode, setMode] = useState("login");
   const [email, setEmail] = useState(DEMO_DOCTORS[0].email);
   const [password, setPassword] = useState(DEMO_DOCTORS[0].password);
-  const [name, setName] = useState("Dr. Anjali Rao");
-  const [specialty, setSpecialty] = useState("Primary Care");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -42,7 +39,6 @@ export default function LoginView({ onAuthSuccess }) {
       setEmail(DEMO_DOCTORS[0].email);
       setPassword(DEMO_DOCTORS[0].password);
     } else {
-      setMode("login");
       setEmail(DEMO_PATIENTS[0].email);
       setPassword(DEMO_PATIENTS[0].password);
     }
@@ -53,33 +49,13 @@ export default function LoginView({ onAuthSuccess }) {
     setLoading(true);
     setError("");
     try {
-      if (portalRole === "patient") {
-        const data = await apiRequest("/api/auth/patient/login", {
-          method: "POST",
-          body: JSON.stringify({ email, password }),
-        });
-        onAuthSuccess({
-          token: data.token,
-          role: "patient",
-          user: data.patient,
-        });
-      } else {
-        const endpoint =
-          mode === "login" ? "/api/auth/login" : "/api/auth/register";
-        const payload =
-          mode === "login"
-            ? { email, password }
-            : { name, email, password, specialty };
-        const data = await apiRequest(endpoint, {
-          method: "POST",
-          body: JSON.stringify(payload),
-        });
-        onAuthSuccess({
-          token: data.token,
-          role: "clinician",
-          user: data.provider,
-        });
-      }
+      const data = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+
+      const userProfile = data.role === "patient" ? data.patient : data.provider;
+      onLogin(data.token, data.role, userProfile);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -177,81 +153,9 @@ export default function LoginView({ onAuthSuccess }) {
           </button>
         </div>
 
-        {portalRole === "clinician" && (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              gap: "1rem",
-              marginBottom: "1.25rem",
-              borderBottom: "1px solid #e2e8f0",
-              paddingBottom: "0.6rem",
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => setMode("login")}
-              style={{
-                background: "none",
-                border: "none",
-                fontWeight: 600,
-                fontSize: "0.88rem",
-                cursor: "pointer",
-                color: mode === "login" ? "#2563eb" : "#64748b",
-                borderBottom:
-                  mode === "login" ? "2px solid #2563eb" : "2px solid transparent",
-                paddingBottom: "0.25rem",
-              }}
-            >
-              Sign In
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("register")}
-              style={{
-                background: "none",
-                border: "none",
-                fontWeight: 600,
-                fontSize: "0.88rem",
-                cursor: "pointer",
-                color: mode === "register" ? "#2563eb" : "#64748b",
-                borderBottom:
-                  mode === "register"
-                    ? "2px solid #2563eb"
-                    : "2px solid transparent",
-                paddingBottom: "0.25rem",
-              }}
-            >
-              Create Account
-            </button>
-          </div>
-        )}
-
         {error && <div className="alert alert-error">{error}</div>}
 
         <form onSubmit={handleSubmit} className="form-stack">
-          {portalRole === "clinician" && mode === "register" && (
-            <>
-              <label>
-                Full Name
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                />
-              </label>
-              <label>
-                Specialty
-                <input
-                  type="text"
-                  value={specialty}
-                  onChange={(e) => setSpecialty(e.target.value)}
-                />
-              </label>
-            </>
-          )}
-
           <label>
             Email
             <input
@@ -303,7 +207,6 @@ export default function LoginView({ onAuthSuccess }) {
                     type="button"
                     className="btn btn-ghost btn-sm"
                     onClick={() => {
-                      setMode("login");
                       setEmail(doc.email);
                       setPassword(doc.password);
                     }}
