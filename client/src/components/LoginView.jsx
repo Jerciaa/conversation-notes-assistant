@@ -73,40 +73,139 @@ export default function LoginView({ onAuthSuccess }) {
   }
 
   return (
-    <div className="auth-shell">
-      <div className="auth-card">
-        <h1>Conversation Notes Assistant</h1>
+    <div
+      className="auth-shell"
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)",
+        padding: "1.5rem",
+      }}
+    >
+      <div
+        className="auth-card"
+        style={{
+          width: "100%",
+          maxWidth: "430px",
+          background: "#ffffff",
+          borderRadius: "16px",
+          padding: "2rem",
+          boxShadow: "0 12px 32px rgba(15, 23, 42, 0.08)",
+          border: "1px solid #e2e8f0",
+        }}
+      >
+        <h1
+          style={{
+            fontSize: "1.5rem",
+            fontWeight: 700,
+            textAlign: "center",
+            color: "#0f172a",
+            marginTop: 0,
+            marginBottom: "1.5rem",
+          }}
+        >
+          Conversation Notes Assistant
+        </h1>
 
-        <div className="tab-row">
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: "0.4rem",
+            background: "#f1f5f9",
+            padding: "0.3rem",
+            borderRadius: "10px",
+            marginBottom: "1.25rem",
+          }}
+        >
           <button
             type="button"
-            className={`tab-btn ${portalRole === "clinician" ? "active" : ""}`}
             onClick={() => switchPortalRole("clinician")}
+            style={{
+              padding: "0.55rem",
+              borderRadius: "8px",
+              border: "none",
+              fontWeight: 600,
+              fontSize: "0.9rem",
+              cursor: "pointer",
+              background: portalRole === "clinician" ? "#ffffff" : "transparent",
+              color: portalRole === "clinician" ? "#2563eb" : "#475569",
+              boxShadow:
+                portalRole === "clinician"
+                  ? "0 1px 4px rgba(0, 0, 0, 0.08)"
+                  : "none",
+            }}
           >
-            Clinician Portal
+            Clinician
           </button>
           <button
             type="button"
-            className={`tab-btn ${portalRole === "patient" ? "active" : ""}`}
             onClick={() => switchPortalRole("patient")}
+            style={{
+              padding: "0.55rem",
+              borderRadius: "8px",
+              border: "none",
+              fontWeight: 600,
+              fontSize: "0.9rem",
+              cursor: "pointer",
+              background: portalRole === "patient" ? "#ffffff" : "transparent",
+              color: portalRole === "patient" ? "#2563eb" : "#475569",
+              boxShadow:
+                portalRole === "patient"
+                  ? "0 1px 4px rgba(0, 0, 0, 0.08)"
+                  : "none",
+            }}
           >
-            Patient Portal
+            Patient
           </button>
         </div>
 
         {portalRole === "clinician" && (
-          <div className="tab-row" style={{ marginTop: "-0.4rem" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              gap: "1rem",
+              marginBottom: "1.25rem",
+              borderBottom: "1px solid #e2e8f0",
+              paddingBottom: "0.6rem",
+            }}
+          >
             <button
               type="button"
-              className={`tab-btn ${mode === "login" ? "active" : ""}`}
               onClick={() => setMode("login")}
+              style={{
+                background: "none",
+                border: "none",
+                fontWeight: 600,
+                fontSize: "0.88rem",
+                cursor: "pointer",
+                color: mode === "login" ? "#2563eb" : "#64748b",
+                borderBottom:
+                  mode === "login" ? "2px solid #2563eb" : "2px solid transparent",
+                paddingBottom: "0.25rem",
+              }}
             >
-              Clinician Sign In
+              Sign In
             </button>
             <button
               type="button"
-              className={`tab-btn ${mode === "register" ? "active" : ""}`}
               onClick={() => setMode("register")}
+              style={{
+                background: "none",
+                border: "none",
+                fontWeight: 600,
+                fontSize: "0.88rem",
+                cursor: "pointer",
+                color: mode === "register" ? "#2563eb" : "#64748b",
+                borderBottom:
+                  mode === "register"
+                    ? "2px solid #2563eb"
+                    : "2px solid transparent",
+                paddingBottom: "0.25rem",
+              }}
             >
               Create Account
             </button>
@@ -119,7 +218,7 @@ export default function LoginView({ onAuthSuccess }) {
           {portalRole === "clinician" && mode === "register" && (
             <>
               <label>
-                Full Name &amp; Credentials
+                Full Name
                 <input
                   type="text"
                   value={name}
@@ -128,7 +227,7 @@ export default function LoginView({ onAuthSuccess }) {
                 />
               </label>
               <label>
-                Clinical Specialty
+                Specialty
                 <input
                   type="text"
                   value={specialty}
@@ -139,7 +238,7 @@ export default function LoginView({ onAuthSuccess }) {
           )}
 
           <label>
-            {portalRole === "patient" ? "Patient Email" : "Provider Email"}
+            Email
             <input
               type="email"
               value={email}
@@ -158,26 +257,30 @@ export default function LoginView({ onAuthSuccess }) {
             />
           </label>
 
-          <button type="submit" className="btn btn-primary" disabled={loading}>
-            {loading
-              ? "Authenticating..."
-              : portalRole === "patient"
-              ? "Sign In to Patient Portal"
-              : mode === "login"
-              ? "Sign In to Clinician Workspace"
-              : "Register & Launch Workspace"}
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={loading}
+            style={{ width: "100%", marginTop: "0.4rem", padding: "0.7rem" }}
+          >
+            {loading ? "Signing in..." : "Sign In"}
           </button>
         </form>
 
         {portalRole === "patient" ? (
-          <div className="demo-box" style={{ marginTop: "1rem" }}>
-            <strong>Demo Patient Accounts:</strong>
+          <div
+            style={{
+              marginTop: "1.25rem",
+              paddingTop: "1rem",
+              borderTop: "1px solid #e2e8f0",
+            }}
+          >
             <div
               style={{
                 display: "flex",
                 flexWrap: "wrap",
                 gap: "0.4rem",
-                marginTop: "0.5rem",
+                justifyContent: "center",
               }}
             >
               {DEMO_PATIENTS.map((p) => (
@@ -190,14 +293,23 @@ export default function LoginView({ onAuthSuccess }) {
                     setPassword("DemoPass123!");
                   }}
                 >
-                  {p.code}: {p.name}
+                  {p.name}
                 </button>
               ))}
             </div>
           </div>
         ) : (
-          <div className="demo-box">
-            <strong>Demo Clinician Account:</strong> <code>dr.arjun@clinic.demo</code>
+          <div
+            style={{
+              marginTop: "1.25rem",
+              paddingTop: "0.85rem",
+              borderTop: "1px solid #e2e8f0",
+              textAlign: "center",
+              fontSize: "0.85rem",
+              color: "#64748b",
+            }}
+          >
+            <code>dr.arjun@clinic.demo</code>
           </div>
         )}
       </div>
