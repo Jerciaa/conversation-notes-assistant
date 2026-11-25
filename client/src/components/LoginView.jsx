@@ -197,8 +197,7 @@ export default function LoginView({ onAuthSuccess }) {
           </div>
         ) : (
           <div className="demo-box">
-            <strong>Demo Clinician Account:</strong> <code>dr.arjun@clinic.demo</code> /{" "}
-            <code>DemoPass123!</code>
+            <strong>Demo Clinician Account:</strong> <code>dr.arjun@clinic.demo</code>
           </div>
         )}
       </div>
