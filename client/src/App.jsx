@@ -1,39 +1,41 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import LoginView from "./components/LoginView";
 import ConsultationRoom from "./components/ConsultationRoom";
 import AuditAndAnalytics from "./components/AuditAndAnalytics";
-import "./App.css";
+import PatientPortal from "./components/PatientPortal";
 
 export default function App() {
-  const [token, setToken] = useState(() => localStorage.getItem("cna_token") || "");
-  const [provider, setProvider] = useState(() => {
-    try {
-      const saved = localStorage.getItem("cna_provider");
-      return saved && saved !== "undefined" ? JSON.parse(saved) : null;
-    } catch {
-      localStorage.removeItem("cna_provider");
-      localStorage.removeItem("cna_token");
-      return null;
-    }
-  });
-  const [activeTab, setActiveTab] = useState("consultations");
+  const [token, setToken] = useState("");
+  const [role, setRole] = useState("provider");
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState("consult");
 
-  function handleLogin(newToken, providerProfile) {
-    localStorage.setItem("cna_token", newToken);
-    localStorage.setItem("cna_provider", JSON.stringify(providerProfile));
+  useEffect(() => {
+    localStorage.removeItem("cna_token");
+    localStorage.removeItem("cna_role");
+    localStorage.removeItem("cna_user");
+    localStorage.removeItem("cna_provider");
+  }, []);
+
+  function handleLogin(newToken, userRole, userProfile) {
     setToken(newToken);
-    setProvider(providerProfile);
+    setRole(userRole || "provider");
+    setUser(userProfile);
   }
 
   function handleLogout() {
-    localStorage.removeItem("cna_token");
-    localStorage.removeItem("cna_provider");
     setToken("");
-    setProvider(null);
+    setRole("provider");
+    setUser(null);
+    setActiveTab("consult");
   }
 
-  if (!token || !provider) {
+  if (!token) {
     return <LoginView onLogin={handleLogin} />;
+  }
+
+  if (role === "patient") {
+    return <PatientPortal token={token} patient={user} onLogout={handleLogout} />;
   }
 
   return (
@@ -41,29 +43,29 @@ export default function App() {
       <header className="topbar">
         <div className="brand-area">
           <strong>Conversation Notes Assistant</strong>
-          <span className="pill pill-green">Zero Raw Audio Storage</span>
+          <span className="pill pill-green">Zero-Audio-Retention Active</span>
         </div>
 
         <nav className="nav-tabs">
           <button
             type="button"
-            className={`tab-btn ${activeTab === "consultations" ? "active" : ""}`}
-            onClick={() => setActiveTab("consultations")}
+            className={`tab-btn ${activeTab === "consult" ? "active" : ""}`}
+            onClick={() => setActiveTab("consult")}
           >
-            Consultation &amp; SOAP Review
+            Consultation Workspace
           </button>
           <button
             type="button"
             className={`tab-btn ${activeTab === "audit" ? "active" : ""}`}
             onClick={() => setActiveTab("audit")}
           >
-            Audit Logs &amp; Analytics
+            Audit &amp; Analytics
           </button>
         </nav>
 
         <div className="user-area">
           <span>
-            {provider.name} ({provider.specialty})
+            {user?.name} ({user?.specialty})
           </span>
           <button type="button" className="btn btn-ghost btn-sm" onClick={handleLogout}>
             Sign Out
@@ -72,8 +74,8 @@ export default function App() {
       </header>
 
       <main className="main-container">
-        {activeTab === "consultations" ? (
-          <ConsultationRoom token={token} />
+        {activeTab === "consult" ? (
+          <ConsultationRoom token={token} provider={user} />
         ) : (
           <AuditAndAnalytics token={token} />
         )}

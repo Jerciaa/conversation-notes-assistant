@@ -1,0 +1,358 @@
+import { useEffect, useState } from "react";
+import { apiRequest } from "../api";
+
+export default function PatientPortal({ token, patient, onLogout }) {
+  const [data, setData] = useState({ patient: patient || {}, callLogs: [], appointments: [] });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [statusMessage, setStatusMessage] = useState("");
+
+  const [availabilityStatus, setAvailabilityStatus] = useState(
+    patient?.availabilityStatus || "AVAILABLE_NOW"
+  );
+  const [availabilityNote, setAvailabilityNote] = useState(
+    patient?.availabilityNote || ""
+  );
+  const [savingAvailability, setSavingAvailability] = useState(false);
+
+  async function loadPortal(silent = false) {
+    if (!silent) setLoading(true);
+    try {
+      const res = await apiRequest("/api/patient-portal/dashboard", {}, token);
+      setData(res);
+      if (!silent && res.patient) {
+        setAvailabilityStatus(res.patient.availabilityStatus || "AVAILABLE_NOW");
+        setAvailabilityNote(res.patient.availabilityNote || "");
+      }
+      setError("");
+    } catch (err) {
+      if (!silent) setError(err.message);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPortal(false);
+    const interval = setInterval(() => {
+      loadPortal(true);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [token]);
+
+  async function handleSendAvailability(e) {
+    e.preventDefault();
+    setSavingAvailability(true);
+    setError("");
+    setStatusMessage("");
+    try {
+      const res = await apiRequest(
+        "/api/patient-portal/availability",
+        {
+          method: "POST",
+          body: JSON.stringify({ availabilityStatus, availabilityNote }),
+        },
+        token
+      );
+      setData((prev) => ({ ...prev, patient: res.patient }));
+      setStatusMessage("Call availability sent to your consultant.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingAvailability(false);
+    }
+  }
+
+  async function handleAnswerCall(visitId) {
+    setError("");
+    setStatusMessage("");
+    try {
+      await apiRequest(`/api/patient-portal/visits/${visitId}/answer`, { method: "POST" }, token);
+      setStatusMessage("Call answered and consent approved. You can now speak with your consultant.");
+      await loadPortal(true);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleDeclineCall(visitId) {
+    setError("");
+    setStatusMessage("");
+    try {
+      await apiRequest(`/api/patient-portal/visits/${visitId}/decline`, { method: "POST" }, token);
+      setStatusMessage("Incoming call declined. Your consultation remains scheduled.");
+      await loadPortal(true);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleWithdrawConsent(visitId) {
+    const confirmed = window.confirm(
+      "Withdraw consent? This will permanently delete and purge this consultation record."
+    );
+    if (!confirmed) return;
+
+    setError("");
+    setStatusMessage("");
+    try {
+      await apiRequest(
+        `/api/patient-portal/visits/${visitId}/consent/withdraw`,
+        { method: "POST" },
+        token
+      );
+      setStatusMessage("Consent withdrawn and consultation data permanently purged.");
+      await loadPortal(true);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  const profile = data.patient || patient || {};
+  const incomingCalls = data.callLogs.filter(
+    (log) => log.status === "CALL_RINGING" || (log.status === "CONSENT_REQUIRED" && log.consentStatus === "PENDING")
+  );
+  const activeCalls = data.callLogs.filter((log) => log.status === "IN_CALL");
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand-area">
+          <strong>Patient Care Portal</strong>
+          <span className="pill pill-blue">{profile.patientCode || "Patient"}</span>
+        </div>
+
+        <div className="user-area">
+          <span>
+            {profile.name} ({profile.email})
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPortal(false)}>
+            Refresh
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onLogout}>
+            Sign Out
+          </button>
+        </div>
+      </header>
+
+      <main className="main-container">
+        {error && <div className="alert alert-error">{error}</div>}
+        {statusMessage && <div className="alert alert-info">{statusMessage}</div>}
+
+        {incomingCalls.map((call) => (
+          <section
+            key={call.id}
+            className="card"
+            style={{
+              border: "2px solid #2563eb",
+              background: "#eff6ff",
+              marginBottom: "1.25rem",
+            }}
+          >
+            <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
+              <span className="pill pill-blue">
+                {call.status === "CALL_RINGING" ? "Incoming Consultation Call" : "Consent Requested"}
+              </span>
+            </div>
+            <h2 style={{ marginTop: 0 }}>
+              {call.doctorName} ({call.doctorSpecialty}) is ready for your {call.visitType}
+            </h2>
+            <p style={{ marginBottom: "1rem" }}>
+              By answering this consultation call, you grant explicit consent for in-memory clinical transcription and After-Visit Summary generation (zero raw audio is stored).
+            </p>
+            <div className="consent-actions">
+              <button
+                type="button"
+                className="btn btn-success"
+                onClick={() => handleAnswerCall(call.id)}
+              >
+                Answer Call &amp; Approve Consent
+              </button>
+              {call.status === "CALL_RINGING" && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => handleDeclineCall(call.id)}
+                >
+                  Decline Call
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                onClick={() => handleWithdrawConsent(call.id)}
+              >
+                Withdraw Consent &amp; Purge
+              </button>
+            </div>
+          </section>
+        ))}
+
+        {activeCalls.map((call) => (
+          <section
+            key={call.id}
+            className="card"
+            style={{
+              border: "2px solid #16a34a",
+              background: "#f0fdf4",
+              marginBottom: "1.25rem",
+            }}
+          >
+            <div className="header-split">
+              <div>
+                <span className="pill pill-green">Connected — Live Consultation In Progress</span>
+                <h2 style={{ marginTop: "0.5rem", marginBottom: "0.25rem" }}>
+                  Speaking with {call.doctorName} ({call.doctorSpecialty})
+                </h2>
+                <p className="subtitle" style={{ marginBottom: 0 }}>
+                  Consent is active. Your consultant is capturing the consultation summary.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                onClick={() => handleWithdrawConsent(call.id)}
+              >
+                Withdraw Consent &amp; Purge
+              </button>
+            </div>
+          </section>
+        ))}
+
+        {loading ? (
+          <div className="card">Loading your care summary and appointments...</div>
+        ) : (
+          <div style={{ display: "grid", gap: "1.25rem" }}>
+            <section className="card">
+              <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
+                <span className="pill pill-blue">Call Availability &amp; Messaging</span>
+              </div>
+              <h2 style={{ marginTop: 0 }}>Notify Consultant of Your Call Availability</h2>
+              <form onSubmit={handleSendAvailability} className="form-stack">
+                <label>
+                  Current Call Status
+                  <select
+                    value={availabilityStatus}
+                    onChange={(e) => setAvailabilityStatus(e.target.value)}
+                  >
+                    <option value="AVAILABLE_NOW">Available Now for Call</option>
+                    <option value="BUSY">Currently Busy (Call Later)</option>
+                    <option value="REQUEST_CALLBACK">Requesting Callback</option>
+                  </select>
+                </label>
+                <label>
+                  Message for Consultant
+                  <input
+                    type="text"
+                    placeholder="e.g., Ready to pick up your call now, or free after 4:00 PM"
+                    value={availabilityNote}
+                    onChange={(e) => setAvailabilityNote(e.target.value)}
+                  />
+                </label>
+                <button type="submit" className="btn btn-primary" disabled={savingAvailability}>
+                  {savingAvailability ? "Sending..." : "Send Availability to Consultant"}
+                </button>
+              </form>
+            </section>
+
+            <section className="card">
+              <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
+                <span className="pill pill-green">Upcoming Appointments</span>
+              </div>
+              <h2 style={{ marginTop: 0 }}>Follow-Up Schedule</h2>
+              {data.appointments.length === 0 ? (
+                <p className="subtitle" style={{ marginBottom: 0 }}>
+                  No upcoming follow-up appointments scheduled yet.
+                </p>
+              ) : (
+                <div style={{ display: "grid", gap: "0.75rem" }}>
+                  {data.appointments.map((appt) => (
+                    <div
+                      key={appt.id}
+                      style={{
+                        padding: "0.85rem 1rem",
+                        border: "1px solid #d0d7de",
+                        borderRadius: "8px",
+                        background: "#f8fafc",
+                      }}
+                    >
+                      <strong>{appt.appointmentDetails}</strong>
+                      <div className="subtitle" style={{ marginTop: "0.25rem", marginBottom: 0 }}>
+                        With {appt.doctorName} ({appt.doctorSpecialty}) &bull; {appt.visitType}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="card">
+              <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
+                <span className="pill pill-blue">Consultation Call Logs &amp; Summaries</span>
+              </div>
+              <h2 style={{ marginTop: 0 }}>Your Visit History</h2>
+              {data.callLogs.length === 0 ? (
+                <p className="subtitle" style={{ marginBottom: 0 }}>
+                  No consultation records found for your account yet.
+                </p>
+              ) : (
+                <div style={{ display: "grid", gap: "1rem" }}>
+                  {data.callLogs.map((log) => (
+                    <div
+                      key={log.id}
+                      style={{
+                        padding: "1rem",
+                        border: "1px solid #d0d7de",
+                        borderRadius: "8px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                          gap: "0.5rem",
+                          marginBottom: "0.5rem",
+                        }}
+                      >
+                        <div>
+                          <strong>{log.visitType}</strong> &mdash; {log.doctorName} ({log.doctorSpecialty})
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                          <span className="pill pill-green">
+                            {new Date(log.date).toLocaleDateString()}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            onClick={() => handleWithdrawConsent(log.id)}
+                          >
+                            Withdraw Consent
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: "0.5rem" }}>
+                        <strong>After-Visit Summary:</strong>
+                        <p style={{ marginTop: "0.35rem", marginBottom: "0.5rem", lineHeight: 1.5 }}>
+                          {log.summary}
+                        </p>
+                      </div>
+
+                      {log.nextAppointment && (
+                        <div className="subtitle" style={{ marginBottom: 0 }}>
+                          <strong>Next Step / Follow-Up:</strong> {log.nextAppointment}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}

@@ -39,6 +39,8 @@ async function seed() {
     {
       patientCode: "PAT-101",
       name: "Rahul Sharma",
+      email: "rahul.sharma@patient.demo",
+      passwordHash,
       age: 48,
       gender: "Male",
       pastMedicalHistory: ["Essential Hypertension", "Dyslipidemia"],
@@ -49,6 +51,8 @@ async function seed() {
     {
       patientCode: "PAT-102",
       name: "Meera Krishnan",
+      email: "meera.krishnan@patient.demo",
+      passwordHash,
       age: 34,
       gender: "Female",
       pastMedicalHistory: ["Generalized Anxiety Disorder"],
@@ -59,6 +63,8 @@ async function seed() {
     {
       patientCode: "PAT-103",
       name: "Arjun Menon",
+      email: "arjun.menon@patient.demo",
+      passwordHash,
       age: 56,
       gender: "Male",
       pastMedicalHistory: ["Type 2 Diabetes Mellitus"],
@@ -69,6 +75,8 @@ async function seed() {
     {
       patientCode: "PAT-104",
       name: "Priya Nair",
+      email: "priya.nair@patient.demo",
+      passwordHash,
       age: 29,
       gender: "Female",
       pastMedicalHistory: ["Mild Intermittent Asthma"],
@@ -79,6 +87,8 @@ async function seed() {
     {
       patientCode: "PAT-105",
       name: "Suresh Iyer",
+      email: "suresh.iyer@patient.demo",
+      passwordHash,
       age: 62,
       gender: "Male",
       pastMedicalHistory: ["Osteoarthritis", "GERD"],
@@ -89,6 +99,8 @@ async function seed() {
     {
       patientCode: "PAT-106",
       name: "Kavita Desai",
+      email: "kavita.desai@patient.demo",
+      passwordHash,
       age: 41,
       gender: "Female",
       pastMedicalHistory: ["Hypothyroidism"],
@@ -124,6 +136,9 @@ async function seed() {
       assessment: "Essential hypertension, well controlled on current therapy.",
       plan: "Continue Amlodipine 5mg daily and Atorvastatin 10mg nightly. Follow up in 3 months with repeat fasting lipid panel.",
     },
+    patientSummary:
+      "Your blood pressure is well controlled at 126/80. Please continue taking Amlodipine 5mg once daily and Atorvastatin 10mg at night.",
+    nextAppointment: "Follow up in 3 months with a repeat fasting lipid blood test.",
     generationTimeMs: 1850,
     providerEdited: false,
     aiFallbackUsed: false,

@@ -94,13 +94,15 @@ export async function generateSoapNote({ transcript, patient, visitType }) {
     return buildFallbackSoap(transcript, patient, visitType, "Missing GROQ_API_KEY");
   }
 
-  const systemPrompt = `You are a clinical documentation assistant generating structured SOAP notes for a licensed healthcare provider.
+  const systemPrompt = `You are a clinical documentation assistant generating structured SOAP notes for a licensed healthcare provider AND a plain-language After-Visit Summary for the patient.
 STRICT GROUNDING RULES (R5 & R6):
 1. Every clinical statement in Subjective, Objective, Assessment, and Plan MUST be directly supported by the consultation transcript or the provided patient chart context.
 2. NEVER invent vitals, lab values, dosages, or diagnoses not explicitly stated in the transcript.
 3. If a detail is ambiguous, inferred, or requires clinician confirmation (e.g., unstated vitals, medication dosage confirmation, allergy cross-check), prefix that sentence with "[VERIFY]" AND add a short explanation to the "verifyFlags" array.
 4. Tailor the structure to the visitType ("${visitType}").
-5. Return ONLY valid JSON with exact keys:
+5. For "patientSummary", write a clear, warm, jargon-free 2-4 sentence summary directly for the patient explaining what was discussed and their care instructions, strictly grounded in the transcript.
+6. For "nextAppointment", extract any follow-up visit timeframe or appointment details mentioned in the transcript (or return "No follow-up appointment scheduled yet").
+7. Return ONLY valid JSON with exact keys:
 {
   "speaker1Role": "Provider or Patient",
   "speaker2Role": "Patient or Provider",
@@ -108,6 +110,8 @@ STRICT GROUNDING RULES (R5 & R6):
   "objective": "string",
   "assessment": "string",
   "plan": "string",
+  "patientSummary": "string",
+  "nextAppointment": "string",
   "verifyFlags": ["string"]
 }`;
 
@@ -167,6 +171,13 @@ ${transcript}`;
         verifyFlags: Array.isArray(parsed.verifyFlags) ? parsed.verifyFlags.map(String) : [],
         isFallback: false,
       },
+      patientSummary: String(
+        parsed.patientSummary ||
+          "Your clinician has recorded notes from this consultation. Please contact the clinic if you have questions about your care plan."
+      ),
+      nextAppointment: String(
+        parsed.nextAppointment || "No follow-up appointment scheduled yet"
+      ),
       fallbackUsed: false,
       fallbackReason: "",
     };
@@ -194,6 +205,9 @@ function buildFallbackSoap(transcript, patient, visitType, reason) {
       ],
       isFallback: true,
     },
+    patientSummary:
+      "Your clinician is finalizing the summary for your recent visit. Check back shortly for your care instructions.",
+    nextAppointment: "No follow-up appointment scheduled yet",
     fallbackUsed: true,
     fallbackReason: reason,
   };

@@ -8,12 +8,18 @@ const VISIT_TYPES = [
   "Urgent Acute Visit",
 ];
 
+function formatAvailabilityLabel(status) {
+  if (status === "BUSY") return "Busy — Call Later";
+  if (status === "REQUEST_CALLBACK") return "Requesting Callback";
+  return "Available Now";
+}
+
 export default function ConsultationRoom({ token }) {
   const [patients, setPatients] = useState([]);
   const [visits, setVisits] = useState([]);
   const [selectedPatientId, setSelectedPatientId] = useState("");
   const [visitType, setVisitType] = useState(VISIT_TYPES[0]);
-  const [activeVisit, setActiveVisit] = useState(null);
+  const [activeVisitId, setActiveVisitId] = useState("");
 
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -26,6 +32,8 @@ export default function ConsultationRoom({ token }) {
     objective: "",
     assessment: "",
     plan: "",
+    patientSummary: "",
+    nextAppointment: "",
   });
 
   const mediaRecorderRef = useRef(null);
@@ -34,30 +42,38 @@ export default function ConsultationRoom({ token }) {
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    loadInitialData();
+    loadInitialData(false);
+    const interval = setInterval(() => {
+      loadInitialData(true);
+    }, 3000);
     return () => {
+      clearInterval(interval);
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [token]);
 
-  async function loadInitialData() {
+  async function loadInitialData(silent = false) {
     try {
       const [pData, vData] = await Promise.all([
         apiRequest("/api/visits/patients", {}, token),
         apiRequest("/api/visits", {}, token),
       ]);
-      setPatients(pData.patients || []);
-      setVisits(vData.visits || []);
-      if (pData.patients?.length > 0 && !selectedPatientId) {
-        setSelectedPatientId(pData.patients[0]._id);
+      const loadedPatients = pData.patients || [];
+      const loadedVisits = vData.visits || [];
+      setPatients(loadedPatients);
+      setVisits(loadedVisits);
+      if (!silent && loadedPatients.length > 0 && !selectedPatientId) {
+        setSelectedPatientId(loadedPatients[0]._id);
       }
     } catch (err) {
-      setError(err.message);
+      if (!silent) setError(err.message);
     }
   }
 
+  const activeVisit = visits.find((v) => v._id === activeVisitId) || null;
+
   function selectVisit(visit) {
-    setActiveVisit(visit);
+    setActiveVisitId(visit?._id || "");
     setError("");
     setStatusMessage("");
     if (visit?.soapFinal || visit?.soapDraft) {
@@ -67,9 +83,18 @@ export default function ConsultationRoom({ token }) {
         objective: src?.objective || "",
         assessment: src?.assessment || "",
         plan: src?.plan || "",
+        patientSummary: visit.patientSummary || "",
+        nextAppointment: visit.nextAppointment || "",
       });
     } else {
-      setSoapForm({ subjective: "", objective: "", assessment: "", plan: "" });
+      setSoapForm({
+        subjective: "",
+        objective: "",
+        assessment: "",
+        plan: "",
+        patientSummary: "",
+        nextAppointment: "",
+      });
     }
   }
 
@@ -88,7 +113,23 @@ export default function ConsultationRoom({ token }) {
       );
       setVisits((prev) => [data.visit, ...prev]);
       selectVisit(data.visit);
-      setStatusMessage("Session initialized. Explicit patient consent is required before audio capture.");
+      setStatusMessage("Session initialized. Ring the patient portal or confirm verbal consent to start.");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleStartCall() {
+    if (!activeVisit) return;
+    setError("");
+    try {
+      const data = await apiRequest(
+        `/api/visits/${activeVisit._id}/call/start`,
+        { method: "POST" },
+        token
+      );
+      updateVisitInState(data.visit);
+      setStatusMessage("Ringing patient's portal device — waiting for patient to answer and approve consent...");
     } catch (err) {
       setError(err.message);
     }
@@ -104,7 +145,7 @@ export default function ConsultationRoom({ token }) {
         token
       );
       updateVisitInState(data.visit);
-      setStatusMessage("Patient consent recorded. In-memory audio capture unlocked.");
+      setStatusMessage("In-room verbal consent recorded. Microphone capture unlocked.");
     } catch (err) {
       setError(err.message);
     }
@@ -125,7 +166,7 @@ export default function ConsultationRoom({ token }) {
         token
       );
       setVisits((prev) => prev.filter((v) => v._id !== activeVisit._id));
-      setActiveVisit(null);
+      setActiveVisitId("");
       setStatusMessage("Consent withdrawn. All visit data and transcripts were permanently purged.");
     } catch (err) {
       setError(err.message);
@@ -201,7 +242,7 @@ export default function ConsultationRoom({ token }) {
       setStatusMessage(
         data.visit.aiFallbackUsed
           ? "AI service unavailable — manual clinical SOAP template loaded."
-          : `Grounded SOAP draft ready in ${latency}s. Raw audio buffer wiped from memory.`
+          : `Grounded SOAP draft & patient summary ready in ${latency}s. Raw audio wiped from memory.`
       );
     } catch (err) {
       setError(err.message);
@@ -221,7 +262,14 @@ export default function ConsultationRoom({ token }) {
           method: "POST",
           body: JSON.stringify({
             decision,
-            soapFinal: soapForm,
+            soapFinal: {
+              subjective: soapForm.subjective,
+              objective: soapForm.objective,
+              assessment: soapForm.assessment,
+              plan: soapForm.plan,
+            },
+            patientSummary: soapForm.patientSummary,
+            nextAppointment: soapForm.nextAppointment,
           }),
         },
         token
@@ -229,7 +277,7 @@ export default function ConsultationRoom({ token }) {
       updateVisitInState(data.visit);
       setStatusMessage(
         decision === "APPROVED"
-          ? "SOAP note signed and approved by clinician."
+          ? "SOAP note signed and patient summary published to Patient Portal."
           : "Draft note rejected and flagged in audit log."
       );
     } catch (err) {
@@ -238,6 +286,11 @@ export default function ConsultationRoom({ token }) {
   }
 
   const consentGranted = activeVisit?.consentStatus === "GRANTED";
+  const selectedPatientObj = patients.find((p) => p._id === selectedPatientId);
+  const livePatientForVisit = activeVisit
+    ? patients.find((p) => p._id === (activeVisit.patientId?._id || activeVisit.patientId)) ||
+      activeVisit.patientId
+    : null;
 
   return (
     <div className="workspace-grid">
@@ -253,11 +306,41 @@ export default function ConsultationRoom({ token }) {
               >
                 {patients.map((p) => (
                   <option key={p._id} value={p._id}>
-                    {p.patientCode} — {p.name} ({p.age}y)
+                    {p.patientCode} — {p.name} ({formatAvailabilityLabel(p.availabilityStatus)})
                   </option>
                 ))}
               </select>
             </label>
+
+            {selectedPatientObj && (
+              <div
+                style={{
+                  padding: "0.65rem 0.75rem",
+                  borderRadius: "6px",
+                  background: "#f8fafc",
+                  border: "1px solid #d0d7de",
+                  fontSize: "0.85rem",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong>Patient Call Status:</strong>
+                  <span
+                    className={`pill ${
+                      selectedPatientObj.availabilityStatus === "BUSY"
+                        ? "pill-blue"
+                        : "pill-green"
+                    }`}
+                  >
+                    {formatAvailabilityLabel(selectedPatientObj.availabilityStatus)}
+                  </span>
+                </div>
+                {selectedPatientObj.availabilityNote && (
+                  <p style={{ marginTop: "0.35rem", marginBottom: 0 }}>
+                    <strong>Message:</strong> &ldquo;{selectedPatientObj.availabilityNote}&rdquo;
+                  </p>
+                )}
+              </div>
+            )}
 
             <label>
               Visit Type
@@ -295,7 +378,11 @@ export default function ConsultationRoom({ token }) {
                     </span>
                   </div>
                   <div className="visit-item-sub">
-                    {v.visitType} • {new Date(v.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    {v.visitType} •{" "}
+                    {new Date(v.createdAt).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
                   </div>
                 </li>
               ))}
@@ -312,7 +399,7 @@ export default function ConsultationRoom({ token }) {
           <div className="card empty-state">
             <h2>Select or Create a Consultation</h2>
             <p className="muted">
-              Every session enforces explicit patient consent prior to microphone capture and processes audio strictly in volatile RAM.
+              Call the patient on their Patient Portal device to request consent, or record in-room after obtaining verbal consent.
             </p>
           </div>
         ) : (
@@ -321,22 +408,57 @@ export default function ConsultationRoom({ token }) {
               <div className="header-split">
                 <div>
                   <h2>
-                    {activeVisit.patientId?.name} ({activeVisit.patientId?.patientCode})
+                    {livePatientForVisit?.name} ({livePatientForVisit?.patientCode})
                   </h2>
                   <p className="muted">
-                    {activeVisit.visitType} • {activeVisit.patientId?.age}y {activeVisit.patientId?.gender}
+                    {activeVisit.visitType} • {livePatientForVisit?.age}y {livePatientForVisit?.gender}
                   </p>
+                  {livePatientForVisit && (
+                    <div style={{ marginTop: "0.4rem" }}>
+                      <span className="pill pill-blue">
+                        Call Status: {formatAvailabilityLabel(livePatientForVisit.availabilityStatus)}
+                      </span>
+                      {livePatientForVisit.availabilityNote && (
+                        <span style={{ marginLeft: "0.5rem", fontSize: "0.9rem" }}>
+                          &ldquo;{livePatientForVisit.availabilityNote}&rdquo;
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="consent-actions">
                   {!consentGranted ? (
-                    <button type="button" className="btn btn-success" onClick={handleGrantConsent}>
-                      Confirm Patient Consent & Unlock Capture
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={handleStartCall}
+                      >
+                        {activeVisit.status === "CALL_RINGING"
+                          ? "Ringing Patient Portal..."
+                          : "Call Patient Portal"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={handleGrantConsent}
+                      >
+                        Override: In-Room Verbal Consent
+                      </button>
+                    </>
                   ) : (
-                    <span className="pill pill-green">Consent Granted</span>
+                    <span className="pill pill-green">
+                      {activeVisit.status === "IN_CALL"
+                        ? "Call Answered — Consent Granted"
+                        : "Consent Granted"}
+                    </span>
                   )}
-                  <button type="button" className="btn btn-danger btn-sm" onClick={handleWithdrawConsent}>
-                    Withdraw Consent & Purge Data
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm"
+                    onClick={handleWithdrawConsent}
+                  >
+                    Withdraw Consent &amp; Purge Data
                   </button>
                 </div>
               </div>
@@ -344,24 +466,25 @@ export default function ConsultationRoom({ token }) {
               <div className="chart-strip">
                 <div>
                   <strong>History:</strong>{" "}
-                  {(activeVisit.patientId?.pastMedicalHistory || []).join(", ") || "None"}
+                  {(livePatientForVisit?.pastMedicalHistory || []).join(", ") || "None"}
                 </div>
                 <div>
                   <strong>Medications:</strong>{" "}
-                  {(activeVisit.patientId?.activeMedications || []).join(", ") || "None"}
+                  {(livePatientForVisit?.activeMedications || []).join(", ") || "None"}
                 </div>
                 <div>
                   <strong>Allergies:</strong>{" "}
-                  {(activeVisit.patientId?.allergies || []).join(", ") || "NKDA"}
+                  {(livePatientForVisit?.allergies || []).join(", ") || "NKDA"}
                 </div>
               </div>
             </div>
 
             <div className={`card ${!consentGranted ? "locked-panel" : ""}`}>
-              <h3>Ambient Audio Capture (Zero Raw Audio Storage)</h3>
+              <h3>Ambient Call &amp; Speech Capture (Zero Raw Audio Storage)</h3>
               {!consentGranted ? (
                 <div className="lock-banner">
-                  <strong>Recording Locked — Consent Required:</strong> Confirm patient consent above before starting microphone capture or uploading consultation audio.
+                  <strong>Capture Locked — Waiting for Patient Consent:</strong> Click{" "}
+                  <strong>Call Patient Portal</strong> above so the patient can pick up and approve consent on their device.
                 </div>
               ) : (
                 <div className="capture-controls">
@@ -372,7 +495,7 @@ export default function ConsultationRoom({ token }) {
                       disabled={processing}
                       onClick={startLiveRecording}
                     >
-                      Start Live Mic Capture (In-Memory)
+                      Speak &amp; Capture Live Call (In-Memory)
                     </button>
                   ) : (
                     <button
@@ -380,7 +503,7 @@ export default function ConsultationRoom({ token }) {
                       className="btn btn-danger"
                       onClick={stopLiveRecording}
                     >
-                      Stop Recording ({recordingSeconds}s) & Generate SOAP Note
+                      End Call ({recordingSeconds}s) &amp; Generate SOAP + Patient Summary
                     </button>
                   )}
 
@@ -401,7 +524,11 @@ export default function ConsultationRoom({ token }) {
                   </button>
                 </div>
               )}
-              {processing && <p className="processing-text">Processing audio in RAM — generating diarized transcript and SOAP draft...</p>}
+              {processing && (
+                <p className="processing-text">
+                  Processing audio in RAM — generating diarized transcript, SOAP draft, and patient summary...
+                </p>
+              )}
             </div>
 
             {activeVisit.transcript && (
@@ -410,7 +537,8 @@ export default function ConsultationRoom({ token }) {
                   <h3>Speaker-Labeled Transcript</h3>
                   {activeVisit.speakerMapping && (
                     <span className="pill pill-blue">
-                      Speaker 1: {activeVisit.speakerMapping.Speaker1} | Speaker 2: {activeVisit.speakerMapping.Speaker2}
+                      Speaker 1: {activeVisit.speakerMapping.Speaker1} | Speaker 2:{" "}
+                      {activeVisit.speakerMapping.Speaker2}
                     </span>
                   )}
                 </div>
@@ -421,7 +549,7 @@ export default function ConsultationRoom({ token }) {
             {(activeVisit.soapDraft?.subjective || activeVisit.status === "MANUAL_FALLBACK") && (
               <div className="card">
                 <div className="header-split">
-                  <h3>Grounded SOAP Note Review & Sign-Off</h3>
+                  <h3>Grounded SOAP Note Review &amp; Sign-Off</h3>
                   <span className={`status-tag status-${activeVisit.status.toLowerCase()}`}>
                     {activeVisit.status.replace(/_/g, " ")}
                   </span>
@@ -473,13 +601,36 @@ export default function ConsultationRoom({ token }) {
                   </label>
                 </div>
 
+                <div className="form-stack" style={{ marginTop: "1rem" }}>
+                  <label>
+                    Patient Portal After-Visit Summary (Plain Language)
+                    <textarea
+                      rows={3}
+                      value={soapForm.patientSummary}
+                      onChange={(e) =>
+                        setSoapForm({ ...soapForm, patientSummary: e.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    Patient Portal Follow-Up / Next Appointment
+                    <input
+                      type="text"
+                      value={soapForm.nextAppointment}
+                      onChange={(e) =>
+                        setSoapForm({ ...soapForm, nextAppointment: e.target.value })
+                      }
+                    />
+                  </label>
+                </div>
+
                 <div className="review-actions">
                   <button
                     type="button"
                     className="btn btn-success"
                     onClick={() => handleReviewDecision("APPROVED")}
                   >
-                    Approve & Sign Note
+                    Approve &amp; Sign Note
                   </button>
                   <button
                     type="button"

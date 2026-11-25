@@ -8,6 +8,7 @@ import { connectDB } from "./config/db.js";
 import authRoutes from "./routes/auth.js";
 import visitRoutes from "./routes/visits.js";
 import adminRoutes from "./routes/admin.js";
+import patientPortalRoutes from "./routes/patientPortal.js";
 
 dotenv.config();
 
@@ -27,6 +28,7 @@ app.get("/api/health", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/visits", visitRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/patient-portal", patientPortalRoutes);
 
 const clientDistPath = path.resolve(__dirname, "../client/dist");
 if (fs.existsSync(clientDistPath)) {
