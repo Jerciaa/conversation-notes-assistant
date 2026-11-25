@@ -51,6 +51,8 @@ export default function ConsultationRoom({ token }) {
   const remoteStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
   const audioCtxRef = useRef(null);
+  const destinationRef = useRef(null);
+  const remoteConnectedToMixerRef = useRef(false);
   const answerAppliedRef = useRef(false);
   const appliedPatientIceCountRef = useRef(0);
   const autoCaptureStartedRef = useRef(false);
@@ -87,8 +89,29 @@ export default function ConsultationRoom({ token }) {
 
   const activeVisit = visits.find((v) => v._id === activeVisitId) || null;
 
+  function attachRemoteStreamToMixer(stream) {
+    if (!stream || remoteConnectedToMixerRef.current) return;
+    if (audioCtxRef.current && destinationRef.current && stream.getAudioTracks().length > 0) {
+      try {
+        const remoteSource = audioCtxRef.current.createMediaStreamSource(stream);
+        remoteSource.connect(destinationRef.current);
+        remoteConnectedToMixerRef.current = true;
+      } catch (err) {
+        console.error("Failed to attach remote stream to mixer:", err);
+      }
+    }
+  }
+
   useEffect(() => {
-    if (!activeVisit || !peerRef.current) return;
+    if (!activeVisit) return;
+
+    if (activeVisit.status === "READY_TO_RECORD" && peerRef.current) {
+      cleanupCallResources();
+      setStatusMessage("Call ended. Patient consent remains active.");
+      return;
+    }
+
+    if (!peerRef.current) return;
 
     async function syncWebRTC() {
       const pc = peerRef.current;
@@ -99,7 +122,7 @@ export default function ConsultationRoom({ token }) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(activeVisit.webrtcAnswer));
           setCallConnected(true);
-          setStatusMessage("Live voice call connected! You can now hear and speak with the patient.");
+          setStatusMessage("Live voice call connected! Recording both Speaker 1 & Speaker 2.");
         } catch (err) {
           console.error("Failed to set remote answer:", err);
         }
@@ -144,6 +167,8 @@ export default function ConsultationRoom({ token }) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
     }
+    destinationRef.current = null;
+    remoteConnectedToMixerRef.current = false;
     remoteStreamRef.current = null;
     answerAppliedRef.current = false;
     appliedPatientIceCountRef.current = 0;
@@ -221,6 +246,7 @@ export default function ConsultationRoom({ token }) {
           remoteAudioRef.current.srcObject = stream;
           remoteAudioRef.current.play().catch(() => {});
         }
+        attachRemoteStreamToMixer(stream);
       };
 
       pc.onicecandidate = (event) => {
@@ -252,6 +278,29 @@ export default function ConsultationRoom({ token }) {
     } catch (err) {
       cleanupCallResources();
       setError("Could not start call: " + err.message);
+    }
+  }
+
+  async function handleCutCallKeepConsent() {
+    if (!activeVisit) return;
+    setError("");
+    try {
+      if (mediaRecorderRef.current && isRecording) {
+        mediaRecorderRef.current.stop();
+        setIsRecording(false);
+        if (timerRef.current) clearInterval(timerRef.current);
+      } else {
+        cleanupCallResources();
+        const data = await apiRequest(
+          `/api/visits/${activeVisit._id}/call/hangup`,
+          { method: "POST" },
+          token
+        );
+        updateVisitInState(data.visit);
+        setStatusMessage("Call cut. Patient consent remains granted so you can resume or recall anytime.");
+      }
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -307,15 +356,19 @@ export default function ConsultationRoom({ token }) {
       localStreamRef.current = localStream;
 
       const audioCtx = new AudioContext();
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
       audioCtxRef.current = audioCtx;
       const destination = audioCtx.createMediaStreamDestination();
+      destinationRef.current = destination;
+      remoteConnectedToMixerRef.current = false;
 
       const localSource = audioCtx.createMediaStreamSource(localStream);
       localSource.connect(destination);
 
-      if (remoteStreamRef.current && remoteStreamRef.current.getAudioTracks().length > 0) {
-        const remoteSource = audioCtx.createMediaStreamSource(remoteStreamRef.current);
-        remoteSource.connect(destination);
+      if (remoteStreamRef.current) {
+        attachRemoteStreamToMixer(remoteStreamRef.current);
       }
 
       const recorder = new MediaRecorder(destination.stream);
@@ -338,7 +391,7 @@ export default function ConsultationRoom({ token }) {
       };
 
       mediaRecorderRef.current = recorder;
-      recorder.start();
+      recorder.start(500);
       setIsRecording(true);
       setRecordingSeconds(0);
       timerRef.current = setInterval(() => {
@@ -368,7 +421,7 @@ export default function ConsultationRoom({ token }) {
     if (!activeVisit) return;
     setProcessing(true);
     setError("");
-    setStatusMessage("Transcribing both voices with speaker diarization and drafting SOAP note...");
+    setStatusMessage("Transcribing Speaker 1 & Speaker 2 and drafting SOAP note...");
     try {
       const formData = new FormData();
       formData.append("audio", blob, filename);
@@ -589,13 +642,32 @@ export default function ConsultationRoom({ token }) {
                       </button>
                     </>
                   ) : (
-                    <span className="pill pill-green">
-                      {callConnected
-                        ? "Live Voice Connected — Consent Granted"
-                        : activeVisit.status === "IN_CALL"
-                        ? "Call Answered — Consent Granted"
-                        : "Consent Granted"}
-                    </span>
+                    <>
+                      <span className="pill pill-green">
+                        {callConnected
+                          ? "Live Voice Connected — Consent Granted"
+                          : activeVisit.status === "IN_CALL"
+                          ? "Call Answered — Consent Granted"
+                          : "Consent Granted (Call Ended)"}
+                      </span>
+                      {(activeVisit.status === "IN_CALL" || activeVisit.status === "CALL_RINGING" || isRecording) ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={handleCutCallKeepConsent}
+                        >
+                          Cut Call (Keep Consent)
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          onClick={handleStartCall}
+                        >
+                          Call Again
+                        </button>
+                      )}
+                    </>
                   )}
                   <button
                     type="button"
@@ -647,7 +719,7 @@ export default function ConsultationRoom({ token }) {
                       className="btn btn-danger"
                       onClick={stopLiveRecording}
                     >
-                      End Call ({recordingSeconds}s) &amp; Generate SOAP + Patient Summary
+                      Cut Call ({recordingSeconds}s) &amp; Generate SOAP + Patient Summary
                     </button>
                   )}
 
@@ -670,7 +742,7 @@ export default function ConsultationRoom({ token }) {
               )}
               {processing && (
                 <p className="processing-text">
-                  Processing mixed two-way audio in RAM — generating diarized transcript, SOAP draft, and patient summary...
+                  Processing mixed two-way audio in RAM — generating Speaker 1 &amp; Speaker 2 transcript, SOAP draft, and patient summary...
                 </p>
               )}
             </div>
@@ -678,7 +750,7 @@ export default function ConsultationRoom({ token }) {
             {activeVisit.transcript && (
               <div className="card">
                 <div className="header-split">
-                  <h3>Speaker-Labeled Transcript</h3>
+                  <h3>Speaker-Labeled Transcript (Speaker 1 &amp; Speaker 2)</h3>
                   {activeVisit.speakerMapping && (
                     <span className="pill pill-blue">
                       Speaker 1: {activeVisit.speakerMapping.Speaker1} | Speaker 2:{" "}

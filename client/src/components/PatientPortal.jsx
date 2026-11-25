@@ -204,6 +204,19 @@ export default function PatientPortal({ token, patient, onLogout }) {
     }
   }
 
+  async function handleHangUpCall(visitId) {
+    setError("");
+    setStatusMessage("");
+    try {
+      cleanupCallResources();
+      await apiRequest(`/api/patient-portal/visits/${visitId}/hangup`, { method: "POST" }, token);
+      setStatusMessage("Call cut. Your consent remains active.");
+      await loadPortal(true);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function handleWithdrawConsent(visitId) {
     const confirmed = window.confirm(
       "Withdraw consent? This will permanently delete and purge this consultation record."
@@ -326,13 +339,22 @@ export default function PatientPortal({ token, patient, onLogout }) {
                   Your microphone is live and you can hear your consultant directly through your speakers.
                 </p>
               </div>
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                onClick={() => handleWithdrawConsent(call.id)}
-              >
-                Withdraw Consent &amp; Purge
-              </button>
+              <div className="consent-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => handleHangUpCall(call.id)}
+                >
+                  Cut Call (Keep Consent)
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={() => handleWithdrawConsent(call.id)}
+                >
+                  Withdraw Consent &amp; Purge
+                </button>
+              </div>
             </div>
           </section>
         ))}

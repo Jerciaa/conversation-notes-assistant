@@ -161,6 +161,30 @@ router.post("/:id/call/ice", async (req, res) => {
   }
 });
 
+router.post("/:id/call/hangup", async (req, res) => {
+  try {
+    const visit = await Visit.findOneAndUpdate(
+      { _id: req.params.id, providerId: req.providerId },
+      {
+        status: "READY_TO_RECORD",
+        webrtcOffer: null,
+        webrtcAnswer: null,
+        providerIceCandidates: [],
+        patientIceCandidates: [],
+      },
+      { new: true }
+    ).populate("patientId", "-passwordHash");
+
+    if (!visit) {
+      return res.status(404).json({ error: "Visit not found" });
+    }
+
+    res.json({ visit });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post("/:id/call/end", async (req, res) => {
   try {
     const visit = await Visit.findOneAndUpdate(
@@ -277,6 +301,11 @@ router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
         .status(400)
         .json({ error: "No audio file or transcript provided." });
     }
+
+    transcript = transcript
+      .replace(/\bSpeaker\s*0\b/gi, "Speaker 1")
+      .replace(/\bSpeaker\s*1\b/gi, "Speaker 1")
+      .replace(/\bSpeaker\s*2\b/gi, "Speaker 2");
 
     const generated = await generateGroundedSoapNote({
       transcript,

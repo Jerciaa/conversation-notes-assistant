@@ -2,44 +2,69 @@ import { useState } from "react";
 import { apiRequest } from "../api";
 
 const DEMO_PATIENTS = [
-  { code: "PAT-101", name: "Rahul Sharma", email: "rahul.sharma@patient.demo" },
-  { code: "PAT-102", name: "Meera Krishnan", email: "meera.krishnan@patient.demo" },
-  { code: "PAT-103", name: "Arjun Menon", email: "arjun.menon@patient.demo" },
-  { code: "PAT-104", name: "Priya Nair", email: "priya.nair@patient.demo" },
-  { code: "PAT-105", name: "Suresh Iyer", email: "suresh.iyer@patient.demo" },
-  { code: "PAT-106", name: "Kavita Desai", email: "kavita.desai@patient.demo" },
+  { code: "PAT-101", name: "Elena Vance", email: "elena.vance@patient.demo" },
+  { code: "PAT-102", name: "Marcus Sterling", email: "marcus.sterling@patient.demo" },
+  { code: "PAT-103", name: "Priya Nair", email: "priya.nair@patient.demo" },
+  { code: "PAT-104", name: "David Okafor", email: "david.okafor@patient.demo" },
+  { code: "PAT-105", name: "Sofia Alvarez", email: "sofia.alvarez@patient.demo" },
+  { code: "PAT-106", name: "Liam Chen", email: "liam.chen@patient.demo" },
 ];
 
-export default function LoginView({ onLogin }) {
-  const [portalMode, setPortalMode] = useState("provider");
-  const [email, setEmail] = useState("dr.anjali@clinic.demo");
+export default function LoginView({ onAuthSuccess }) {
+  const [portalRole, setPortalRole] = useState("clinician");
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("dr.arjun@clinic.demo");
   const [password, setPassword] = useState("DemoPass123!");
-  const [error, setError] = useState("");
+  const [name, setName] = useState("Dr. Arjun Mehta");
+  const [specialty, setSpecialty] = useState("Internal Medicine");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  function switchMode(mode) {
-    setPortalMode(mode);
+  function switchPortalRole(role) {
+    setPortalRole(role);
     setError("");
-    if (mode === "provider") {
-      setEmail("dr.anjali@clinic.demo");
+    if (role === "clinician") {
+      setEmail("dr.arjun@clinic.demo");
       setPassword("DemoPass123!");
     } else {
-      setEmail("rahul.sharma@patient.demo");
+      setMode("login");
+      setEmail("elena.vance@patient.demo");
       setPassword("DemoPass123!");
     }
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
-    setError("");
     setLoading(true);
+    setError("");
     try {
-      const data = await apiRequest("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email, password }),
-      });
-      const userProfile = data.role === "patient" ? data.patient : data.provider;
-      onLogin(data.token, data.role || "provider", userProfile);
+      if (portalRole === "patient") {
+        const data = await apiRequest("/api/auth/patient/login", {
+          method: "POST",
+          body: JSON.stringify({ email, password }),
+        });
+        onAuthSuccess({
+          token: data.token,
+          role: "patient",
+          user: data.patient,
+        });
+      } else {
+        const endpoint =
+          mode === "login" ? "/api/auth/login" : "/api/auth/register";
+        const payload =
+          mode === "login"
+            ? { email, password }
+            : { name, email, password, specialty };
+        const data = await apiRequest(endpoint, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        onAuthSuccess({
+          token: data.token,
+          role: "clinician",
+          user: data.provider,
+        });
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -48,39 +73,73 @@ export default function LoginView({ onLogin }) {
   }
 
   return (
-    <div className="login-shell">
-      <div className="login-card">
-        <div className="badge-row">
-          <span className="pill pill-blue">Zero Raw Audio Retention</span>
-          <span className="pill pill-green">Role-Based Data Isolation</span>
-        </div>
+    <div className="auth-shell">
+      <div className="auth-card">
         <h1>Conversation Notes Assistant</h1>
-        <p className="subtitle">
-          {portalMode === "provider"
-            ? "Privacy-first clinical documentation and grounded SOAP note drafting for outpatient consultations."
-            : "Patient Portal: View your visit summaries, consultation call logs, and upcoming appointments."}
-        </p>
 
-        <div className="demo-buttons" style={{ marginBottom: "1rem" }}>
+        <div className="tab-row">
           <button
             type="button"
-            className={`btn btn-sm ${portalMode === "provider" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => switchMode("provider")}
+            className={`tab-btn ${portalRole === "clinician" ? "active" : ""}`}
+            onClick={() => switchPortalRole("clinician")}
           >
             Clinician Portal
           </button>
           <button
             type="button"
-            className={`btn btn-sm ${portalMode === "patient" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => switchMode("patient")}
+            className={`tab-btn ${portalRole === "patient" ? "active" : ""}`}
+            onClick={() => switchPortalRole("patient")}
           >
             Patient Portal
           </button>
         </div>
 
+        {portalRole === "clinician" && (
+          <div className="tab-row" style={{ marginTop: "-0.4rem" }}>
+            <button
+              type="button"
+              className={`tab-btn ${mode === "login" ? "active" : ""}`}
+              onClick={() => setMode("login")}
+            >
+              Clinician Sign In
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${mode === "register" ? "active" : ""}`}
+              onClick={() => setMode("register")}
+            >
+              Create Account
+            </button>
+          </div>
+        )}
+
+        {error && <div className="alert alert-error">{error}</div>}
+
         <form onSubmit={handleSubmit} className="form-stack">
+          {portalRole === "clinician" && mode === "register" && (
+            <>
+              <label>
+                Full Name &amp; Credentials
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+              </label>
+              <label>
+                Clinical Specialty
+                <input
+                  type="text"
+                  value={specialty}
+                  onChange={(e) => setSpecialty(e.target.value)}
+                />
+              </label>
+            </>
+          )}
+
           <label>
-            {portalMode === "provider" ? "Clinician Email" : "Patient Email"}
+            {portalRole === "patient" ? "Patient Email" : "Provider Email"}
             <input
               type="email"
               value={email}
@@ -88,6 +147,7 @@ export default function LoginView({ onLogin }) {
               required
             />
           </label>
+
           <label>
             Password
             <input
@@ -97,46 +157,29 @@ export default function LoginView({ onLogin }) {
               required
             />
           </label>
-          {error && <div className="alert alert-error">{error}</div>}
+
           <button type="submit" className="btn btn-primary" disabled={loading}>
             {loading
-              ? "Signing in..."
-              : portalMode === "provider"
-              ? "Sign In as Clinician"
-              : "Sign In to Patient Portal"}
+              ? "Authenticating..."
+              : portalRole === "patient"
+              ? "Sign In to Patient Portal"
+              : mode === "login"
+              ? "Sign In to Clinician Workspace"
+              : "Register & Launch Workspace"}
           </button>
         </form>
 
-        {portalMode === "provider" ? (
-          <div className="demo-accounts">
-            <strong>Pilot Accounts (Row-Level Data Isolation):</strong>
-            <div className="demo-buttons">
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => {
-                  setEmail("dr.anjali@clinic.demo");
-                  setPassword("DemoPass123!");
-                }}
-              >
-                Dr. Anjali Rao (Primary Care)
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => {
-                  setEmail("dr.vikram@clinic.demo");
-                  setPassword("DemoPass123!");
-                }}
-              >
-                Dr. Vikram Nair (Internal Medicine)
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="demo-accounts">
-            <strong>Demo Patient Accounts (Password: DemoPass123!):</strong>
-            <div className="demo-buttons">
+        {portalRole === "patient" ? (
+          <div className="demo-box" style={{ marginTop: "1rem" }}>
+            <strong>Demo Patient Accounts:</strong>
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "0.4rem",
+                marginTop: "0.5rem",
+              }}
+            >
               {DEMO_PATIENTS.map((p) => (
                 <button
                   key={p.code}
@@ -147,10 +190,15 @@ export default function LoginView({ onLogin }) {
                     setPassword("DemoPass123!");
                   }}
                 >
-                  {p.name} ({p.code})
+                  {p.code}: {p.name}
                 </button>
               ))}
             </div>
+          </div>
+        ) : (
+          <div className="demo-box">
+            <strong>Demo Clinician Account:</strong> <code>dr.arjun@clinic.demo</code> /{" "}
+            <code>DemoPass123!</code>
           </div>
         )}
       </div>
