@@ -76,7 +76,9 @@ export default function PatientPortal({ token, patient, onLogout }) {
 
   const profile = data.patient || patient || {};
   const incomingCalls = data.callLogs.filter(
-    (log) => log.status === "CALL_RINGING" || (log.status === "CONSENT_REQUIRED" && log.consentStatus === "PENDING")
+    (log) =>
+      log.status === "CALL_RINGING" ||
+      (log.status === "CONSENT_REQUIRED" && log.consentStatus === "PENDING")
   );
   const activeCalls = data.callLogs.filter((log) => log.status === "IN_CALL");
   const currentActiveCall = activeCalls[0] || null;
@@ -131,7 +133,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
 
   async function handleAnswerCall(call) {
     setError("");
-    setStatusMessage("Connecting live audio and approving consent...");
+    setStatusMessage("Connecting live audio...");
     try {
       cleanupCallResources();
       let answerPayload = null;
@@ -191,7 +193,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
         },
         token
       );
-      setStatusMessage("Live voice call connected and consent approved. Speak naturally with your consultant.");
+      setStatusMessage("Live voice call connected. Speak naturally with your consultant.");
       await loadPortal(true);
     } catch (err) {
       cleanupCallResources();
@@ -212,35 +214,38 @@ export default function PatientPortal({ token, patient, onLogout }) {
     }
   }
 
-  async function handleHangUpCall(visitId) {
+  // Button 1: Cut Call (leaves consent state untouched)
+  async function handleCutCall(visitId) {
     setError("");
     setStatusMessage("");
     try {
       cleanupCallResources();
       await apiRequest(`/api/patient-portal/visits/${visitId}/hangup`, { method: "POST" }, token);
-      setStatusMessage("Call cut. Your consent remains active.");
+      setStatusMessage("Call cut. Your consent status remains unchanged.");
       await loadPortal(true);
     } catch (err) {
       setError(err.message);
     }
   }
 
+  // Button 2: Remove Consent (stops recording & clears SOAP data, keeps live call running)
   async function handleWithdrawConsent(visitId) {
     const confirmed = window.confirm(
-      "Withdraw consent? This will permanently delete and purge this consultation record."
+      "Remove consent? AI recording and SOAP notes will stop and any generated notes will be purged, while your live call and visit history continue normally."
     );
     if (!confirmed) return;
 
     setError("");
     setStatusMessage("");
     try {
-      cleanupCallResources();
       await apiRequest(
         `/api/patient-portal/visits/${visitId}/consent/withdraw`,
         { method: "POST" },
         token
       );
-      setStatusMessage("Consent withdrawn and consultation data permanently purged.");
+      setStatusMessage(
+        "Consent removed and AI/SOAP data purged. Your live call continues without recording."
+      );
       await loadPortal(true);
     } catch (err) {
       setError(err.message);
@@ -294,7 +299,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
               {call.doctorName} ({call.doctorSpecialty}) is calling for your {call.visitType}
             </h2>
             <p style={{ marginBottom: "1rem" }}>
-              Answering connects your microphone and speaker for a live consultation call and grants explicit consent for in-memory clinical transcription (zero raw audio is stored).
+              Answering connects your microphone and speaker for a live consultation call. You can remove AI recording consent at any time without ending the call.
             </p>
             <div className="consent-actions">
               <button
@@ -302,7 +307,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
                 className="btn btn-success"
                 onClick={() => handleAnswerCall(call)}
               >
-                Answer Call &amp; Approve Consent
+                Answer Call
               </button>
               {call.status === "CALL_RINGING" && (
                 <button
@@ -313,13 +318,15 @@ export default function PatientPortal({ token, patient, onLogout }) {
                   Decline Call
                 </button>
               )}
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                onClick={() => handleWithdrawConsent(call.id)}
-              >
-                Withdraw Consent &amp; Purge
-              </button>
+              {call.consentStatus !== "WITHDRAWN" && (
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={() => handleWithdrawConsent(call.id)}
+                >
+                  Remove Consent
+                </button>
+              )}
             </div>
           </section>
         ))}
@@ -340,7 +347,12 @@ export default function PatientPortal({ token, patient, onLogout }) {
                   <span className="pill pill-green">
                     {callConnected
                       ? "Connected — Live Two-Way Audio Active"
-                      : "In Call — Consent Active"}
+                      : "In Call"}
+                  </span>
+                  <span className="pill pill-blue">
+                    {call.consentStatus === "WITHDRAWN"
+                      ? "Unrecorded Call (Consent Removed)"
+                      : "Consent Active"}
                   </span>
                   <span className="pill pill-blue">{formatDateTime(call.date)}</span>
                 </div>
@@ -355,17 +367,19 @@ export default function PatientPortal({ token, patient, onLogout }) {
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm"
-                  onClick={() => handleHangUpCall(call.id)}
+                  onClick={() => handleCutCall(call.id)}
                 >
-                  Cut Call (Keep Consent)
+                  Cut Call
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-danger btn-sm"
-                  onClick={() => handleWithdrawConsent(call.id)}
-                >
-                  Withdraw Consent &amp; Purge
-                </button>
+                {call.consentStatus !== "WITHDRAWN" && (
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm"
+                    onClick={() => handleWithdrawConsent(call.id)}
+                  >
+                    Remove Consent
+                  </button>
+                )}
               </div>
             </div>
           </section>
@@ -478,13 +492,17 @@ export default function PatientPortal({ token, patient, onLogout }) {
                           {log.isSummaryApproved && (
                             <span className="pill pill-blue">Approved by Provider</span>
                           )}
-                          <button
-                            type="button"
-                            className="btn btn-danger btn-sm"
-                            onClick={() => handleWithdrawConsent(log.id)}
-                          >
-                            Withdraw Consent
-                          </button>
+                          {log.consentStatus === "WITHDRAWN" ? (
+                            <span className="pill pill-blue">Consent Removed</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              onClick={() => handleWithdrawConsent(log.id)}
+                            >
+                              Remove Consent
+                            </button>
+                          )}
                         </div>
                       </div>
 

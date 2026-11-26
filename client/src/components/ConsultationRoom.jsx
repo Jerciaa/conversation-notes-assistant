@@ -51,6 +51,7 @@ export default function ConsultationRoom({ token }) {
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const skipUploadOnStopRef = useRef(false);
   const timerRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -97,6 +98,21 @@ export default function ConsultationRoom({ token }) {
 
   const activeVisit = visits.find((v) => v._id === activeVisitId) || null;
 
+  function stopRecordingSilently() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      skipUploadOnStopRef.current = true;
+      mediaRecorderRef.current.stop();
+    }
+    mediaRecorderRef.current = null;
+    audioChunksRef.current = [];
+    setIsRecording(false);
+    setRecordingSeconds(0);
+  }
+
   function attachRemoteStreamToMixer(stream) {
     if (!stream || remoteConnectedToMixerRef.current) return;
     if (audioCtxRef.current && mergerRef.current && stream.getAudioTracks().length > 0) {
@@ -113,9 +129,19 @@ export default function ConsultationRoom({ token }) {
   useEffect(() => {
     if (!activeVisit) return;
 
-    if (activeVisit.status === "READY_TO_RECORD" && peerRef.current) {
+    // If patient withdrew consent mid-call, stop recording immediately while keeping the live call running
+    if (activeVisit.consentStatus === "WITHDRAWN" && isRecording) {
+      stopRecordingSilently();
+      setStatusMessage("Consent removed — recording stopped. Live voice call continues normally.");
+    }
+
+    if (
+      activeVisit.status !== "IN_CALL" &&
+      activeVisit.status !== "CALL_RINGING" &&
+      peerRef.current
+    ) {
       cleanupCallResources();
-      setStatusMessage("Call ended. Patient consent remains active.");
+      setStatusMessage("Call ended.");
       return;
     }
 
@@ -130,7 +156,11 @@ export default function ConsultationRoom({ token }) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(activeVisit.webrtcAnswer));
           setCallConnected(true);
-          setStatusMessage("Live voice call connected! Recording Provider & Patient voices.");
+          setStatusMessage(
+            activeVisit.consentStatus === "GRANTED"
+              ? "Live voice call connected! Recording Provider & Patient voices."
+              : "Live voice call connected (unrecorded)."
+          );
         } catch (err) {
           console.error("Failed to set remote answer:", err);
         }
@@ -204,8 +234,8 @@ export default function ConsultationRoom({ token }) {
         objective: "",
         assessment: "",
         plan: "",
-        patientSummary: "",
-        nextAppointment: "",
+        patientSummary: visit?.patientSummary || "",
+        nextAppointment: visit?.nextAppointment || "",
       });
     }
   }
@@ -289,15 +319,18 @@ export default function ConsultationRoom({ token }) {
     }
   }
 
-  async function handleCutCallKeepConsent() {
+  // Button 1: Cut Call (leaves consent state untouched)
+  async function handleCutCall() {
     if (!activeVisit) return;
     setError("");
     try {
-      if (mediaRecorderRef.current && isRecording) {
+      if (mediaRecorderRef.current && isRecording && activeVisit.consentStatus === "GRANTED") {
+        skipUploadOnStopRef.current = false;
         mediaRecorderRef.current.stop();
         setIsRecording(false);
         if (timerRef.current) clearInterval(timerRef.current);
       } else {
+        stopRecordingSilently();
         cleanupCallResources();
         const data = await apiRequest(
           `/api/visits/${activeVisit._id}/call/hangup`,
@@ -305,7 +338,7 @@ export default function ConsultationRoom({ token }) {
           token
         );
         updateVisitInState(data.visit);
-        setStatusMessage("Call cut. Patient consent remains granted so you can resume or recall anytime.");
+        setStatusMessage("Call cut. Consent status unchanged.");
       }
     } catch (err) {
       setError(err.message);
@@ -328,24 +361,28 @@ export default function ConsultationRoom({ token }) {
     }
   }
 
+  // Button 2: Remove Consent (stops recording & clears SOAP data, keeps live call active)
   async function handleWithdrawConsent() {
     if (!activeVisit) return;
     const confirmed = window.confirm(
-      "Withdraw patient consent? This will permanently delete the consultation transcript, SOAP note, and visit data."
+      "Remove consent? AI recording and SOAP note generation will stop and any draft notes will be purged, while the live call and visit history remain intact."
     );
     if (!confirmed) return;
 
     setError("");
     try {
-      cleanupCallResources();
-      await apiRequest(
+      stopRecordingSilently();
+      const data = await apiRequest(
         `/api/visits/${activeVisit._id}/consent/withdraw`,
         { method: "POST" },
         token
       );
-      setVisits((prev) => prev.filter((v) => v._id !== activeVisit._id));
-      setActiveVisitId("");
-      setStatusMessage("Consent withdrawn. All visit data and transcripts were permanently purged.");
+      if (data.visit) {
+        updateVisitInState(data.visit);
+      }
+      setStatusMessage(
+        "Consent removed. Recording stopped and SOAP data purged; live call continues without recording."
+      );
     } catch (err) {
       setError(err.message);
     }
@@ -385,14 +422,22 @@ export default function ConsultationRoom({ token }) {
 
       const recorder = new MediaRecorder(destination.stream);
       audioChunksRef.current = [];
+      skipUploadOnStopRef.current = false;
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
 
       recorder.onstop = async () => {
+        const shouldSkip = skipUploadOnStopRef.current;
+        skipUploadOnStopRef.current = false;
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
         audioChunksRef.current = [];
+
+        if (shouldSkip) {
+          return;
+        }
+
         cleanupCallResources();
         if (activeVisit) {
           await apiRequest(`/api/visits/${activeVisit._id}/call/end`, { method: "POST" }, token).catch(
@@ -416,6 +461,7 @@ export default function ConsultationRoom({ token }) {
 
   function stopLiveRecording() {
     if (mediaRecorderRef.current && isRecording) {
+      skipUploadOnStopRef.current = false;
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
@@ -519,6 +565,15 @@ export default function ConsultationRoom({ token }) {
   }
 
   const consentGranted = activeVisit?.consentStatus === "GRANTED";
+  const consentWithdrawn = activeVisit?.consentStatus === "WITHDRAWN";
+  const isCallActive =
+    activeVisit?.status === "IN_CALL" ||
+    activeVisit?.status === "CALL_RINGING" ||
+    callConnected ||
+    isRecording;
+  const isNoteFinalized =
+    activeVisit?.status === "APPROVED" || activeVisit?.status === "REJECTED";
+
   const selectedPatientObj = patients.find((p) => p._id === selectedPatientId);
   const livePatientForVisit = activeVisit
     ? patients.find((p) => p._id === (activeVisit.patientId?._id || activeVisit.patientId)) ||
@@ -623,7 +678,7 @@ export default function ConsultationRoom({ token }) {
         </div>
 
         <div className="card">
-          <h3>Your Consultations ({visits.length})</h3>
+          <h3>Your Consultations &amp; Call History ({visits.length})</h3>
           {visits.length === 0 ? (
             <p className="muted">No visits yet. Create a session above.</p>
           ) : (
@@ -643,6 +698,11 @@ export default function ConsultationRoom({ token }) {
                   <div className="visit-item-sub">
                     {v.visitType} • {formatDateTime(v.createdAt)}
                   </div>
+                  {v.nextAppointment && (
+                    <div className="visit-item-sub" style={{ marginTop: "0.2rem", color: "#0f766e" }}>
+                      <strong>Next Appointment:</strong> {v.nextAppointment}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -677,10 +737,15 @@ export default function ConsultationRoom({ token }) {
                     {activeVisit.callStartedAt && (
                       <>
                         {" "}
-                        • <strong>Call Started:</strong> {formatDateTime(activeVisit.callStartedAt)}
+                        - <strong>Call Started:</strong> {formatDateTime(activeVisit.callStartedAt)}
                       </>
                     )}
                   </p>
+                  {activeVisit.nextAppointment && (
+                    <p style={{ fontSize: "0.85rem", marginTop: "0.25rem", color: "#0f766e" }}>
+                      <strong>Next Appointment:</strong> {activeVisit.nextAppointment}
+                    </p>
+                  )}
                   {livePatientForVisit && (
                     <div style={{ marginTop: "0.4rem" }}>
                       <span className="pill pill-blue">
@@ -704,60 +769,60 @@ export default function ConsultationRoom({ token }) {
                       Download Approved SOAP File
                     </button>
                   )}
-                  {!consentGranted ? (
-                    <>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={handleStartCall}
-                      >
-                        {activeVisit.status === "CALL_RINGING"
-                          ? "Ringing Patient Portal..."
-                          : "Call Patient Portal (Live Voice)"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        onClick={handleGrantConsent}
-                      >
-                        Override: In-Room Verbal Consent
-                      </button>
-                    </>
+
+                  {consentGranted ? (
+                    <span className="pill pill-green">
+                      {callConnected
+                        ? "Live Voice Connected — Consent Granted"
+                        : activeVisit.status === "IN_CALL"
+                        ? "Call Answered — Consent Granted"
+                        : "Consent Granted"}
+                    </span>
+                  ) : consentWithdrawn ? (
+                    <span className="pill pill-blue">
+                      {isCallActive ? "Live Call Active — Consent Removed" : "Consent Removed"}
+                    </span>
                   ) : (
-                    <>
-                      <span className="pill pill-green">
-                        {callConnected
-                          ? "Live Voice Connected — Consent Granted"
-                          : activeVisit.status === "IN_CALL"
-                          ? "Call Answered — Consent Granted"
-                          : "Consent Granted (Call Ended)"}
-                      </span>
-                      {(activeVisit.status === "IN_CALL" || activeVisit.status === "CALL_RINGING" || isRecording) ? (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          onClick={handleCutCallKeepConsent}
-                        >
-                          Cut Call (Keep Consent)
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn btn-primary btn-sm"
-                          onClick={handleStartCall}
-                        >
-                          Call Again
-                        </button>
-                      )}
-                    </>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={handleGrantConsent}
+                    >
+                      Override: In-Room Verbal Consent
+                    </button>
                   )}
-                  <button
-                    type="button"
-                    className="btn btn-danger btn-sm"
-                    onClick={handleWithdrawConsent}
-                  >
-                    Withdraw Consent &amp; Purge Data
-                  </button>
+
+                  {/* Button 1: Cut Call (or Start/Call Again when not in call) */}
+                  {isCallActive ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={handleCutCall}
+                    >
+                      Cut Call
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={handleStartCall}
+                    >
+                      {activeVisit.status === "CALL_RINGING"
+                        ? "Ringing Patient Portal..."
+                        : "Call Patient Portal"}
+                    </button>
+                  )}
+
+                  {/* Button 2: Remove Consent (independent of Cut Call) */}
+                  {!consentWithdrawn && (
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={handleWithdrawConsent}
+                    >
+                      Remove Consent
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -781,8 +846,14 @@ export default function ConsultationRoom({ token }) {
               <h3>Two-Way Live Voice &amp; Ambient Capture (Zero Raw Audio Storage)</h3>
               {!consentGranted ? (
                 <div className="lock-banner">
-                  <strong>Capture Locked — Waiting for Patient Consent:</strong> Click{" "}
-                  <strong>Call Patient Portal (Live Voice)</strong> above so the patient can pick up and start the two-way call.
+                  <strong>
+                    {consentWithdrawn
+                      ? "Consent Removed — Normal Unrecorded Call Mode:"
+                      : "Capture Locked — Waiting for Patient Consent:"}
+                  </strong>{" "}
+                  {consentWithdrawn
+                    ? "AI recording and SOAP note generation are disabled for this consultation."
+                    : "Click Call Patient Portal above so the patient can pick up and start the two-way call."}
                 </div>
               ) : (
                 <div className="capture-controls">
@@ -801,7 +872,7 @@ export default function ConsultationRoom({ token }) {
                       className="btn btn-danger"
                       onClick={stopLiveRecording}
                     >
-                      Cut Call ({recordingSeconds}s) &amp; Generate SOAP + Patient Summary
+                      Stop Capture ({recordingSeconds}s) &amp; Generate SOAP + Summary
                     </button>
                   )}
 
@@ -923,6 +994,7 @@ export default function ConsultationRoom({ token }) {
                     Subjective (S)
                     <textarea
                       rows={4}
+                      disabled={isNoteFinalized}
                       value={soapForm.subjective}
                       onChange={(e) => setSoapForm({ ...soapForm, subjective: e.target.value })}
                     />
@@ -931,6 +1003,7 @@ export default function ConsultationRoom({ token }) {
                     Objective (O)
                     <textarea
                       rows={4}
+                      disabled={isNoteFinalized}
                       value={soapForm.objective}
                       onChange={(e) => setSoapForm({ ...soapForm, objective: e.target.value })}
                     />
@@ -939,6 +1012,7 @@ export default function ConsultationRoom({ token }) {
                     Assessment (A)
                     <textarea
                       rows={4}
+                      disabled={isNoteFinalized}
                       value={soapForm.assessment}
                       onChange={(e) => setSoapForm({ ...soapForm, assessment: e.target.value })}
                     />
@@ -947,6 +1021,7 @@ export default function ConsultationRoom({ token }) {
                     Plan (P)
                     <textarea
                       rows={4}
+                      disabled={isNoteFinalized}
                       value={soapForm.plan}
                       onChange={(e) => setSoapForm({ ...soapForm, plan: e.target.value })}
                     />
@@ -958,6 +1033,7 @@ export default function ConsultationRoom({ token }) {
                     Patient Portal After-Visit Summary (Plain Language)
                     <textarea
                       rows={3}
+                      disabled={isNoteFinalized}
                       value={soapForm.patientSummary}
                       onChange={(e) =>
                         setSoapForm({ ...soapForm, patientSummary: e.target.value })
@@ -968,6 +1044,7 @@ export default function ConsultationRoom({ token }) {
                     Patient Portal Follow-Up / Next Appointment
                     <input
                       type="text"
+                      disabled={isNoteFinalized}
                       value={soapForm.nextAppointment}
                       onChange={(e) =>
                         setSoapForm({ ...soapForm, nextAppointment: e.target.value })
@@ -976,22 +1053,37 @@ export default function ConsultationRoom({ token }) {
                   </label>
                 </div>
 
-                <div className="review-actions">
-                  <button
-                    type="button"
-                    className="btn btn-success"
-                    onClick={() => handleReviewDecision("APPROVED")}
-                  >
-                    Approve &amp; Sign Note
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-danger"
-                    onClick={() => handleReviewDecision("REJECTED")}
-                  >
-                    Reject Draft Note
-                  </button>
-                </div>
+                {/* Hide Approve & Reject buttons once finalized */}
+                {!isNoteFinalized ? (
+                  <div className="review-actions">
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      onClick={() => handleReviewDecision("APPROVED")}
+                    >
+                      Approve &amp; Sign Note
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => handleReviewDecision("REJECTED")}
+                    >
+                      Reject Draft Note
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ marginTop: "1rem" }}>
+                    <span
+                      className={`pill ${
+                        activeVisit.status === "APPROVED" ? "pill-green" : "pill-blue"
+                      }`}
+                    >
+                      {activeVisit.status === "APPROVED"
+                        ? "✓ Note Approved & Signed"
+                        : "Draft Rejected"}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </>

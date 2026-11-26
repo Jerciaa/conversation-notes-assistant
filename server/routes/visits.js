@@ -244,10 +244,26 @@ router.post("/:id/call/ice", async (req, res) => {
 
 router.post("/:id/call/hangup", async (req, res) => {
   try {
+    const existing = await Visit.findOne({
+      _id: req.params.id,
+      providerId: req.providerId,
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Visit not found" });
+    }
+
+    // Preserve APPROVED/REJECTED/DRAFT_READY status if a note already exists; otherwise move out of IN_CALL
+    const preservedStatuses = ["APPROVED", "REJECTED", "DRAFT_READY"];
+    const nextStatus = preservedStatuses.includes(existing.status)
+      ? existing.status
+      : existing.consentStatus === "GRANTED"
+      ? "READY_TO_RECORD"
+      : "CONSENT_REQUIRED";
+
     const visit = await Visit.findOneAndUpdate(
       { _id: req.params.id, providerId: req.providerId },
       {
-        status: "READY_TO_RECORD",
+        status: nextStatus,
         webrtcOffer: null,
         webrtcAnswer: null,
         providerIceCandidates: [],
@@ -255,10 +271,6 @@ router.post("/:id/call/hangup", async (req, res) => {
       },
       { new: true }
     ).populate("patientId", "-passwordHash");
-
-    if (!visit) {
-      return res.status(404).json({ error: "Visit not found" });
-    }
 
     res.json({ visit });
   } catch (err) {
@@ -322,32 +334,52 @@ router.post("/:id/consent/grant", async (req, res) => {
 
 router.post("/:id/consent/withdraw", async (req, res) => {
   try {
-    const visit = await Visit.findOne({
+    const existing = await Visit.findOne({
       _id: req.params.id,
       providerId: req.providerId,
     }).populate("patientId");
 
-    if (!visit) {
+    if (!existing) {
       return res.status(404).json({ error: "Visit not found" });
     }
 
-    const visitIdStr = visit._id.toString();
-    const patientLabel = visit.patientId
-      ? `${visit.patientId.name} (${visit.patientId.patientCode})`
+    const visitIdStr = existing._id.toString();
+    const patientLabel = existing.patientId
+      ? `${existing.patientId.name} (${existing.patientId.patientCode})`
       : "Unknown Patient";
 
-    await Visit.deleteOne({ _id: visit._id, providerId: req.providerId });
-    await AuditLog.deleteMany({ visitId: visitIdStr, providerId: req.providerId });
+    // Keep the live call (IN_CALL / CALL_RINGING) and visit history intact; purge AI/SOAP data only
+    const nextStatus =
+      existing.status === "IN_CALL" || existing.status === "CALL_RINGING"
+        ? existing.status
+        : "CONSENT_REQUIRED";
+
+    const visit = await Visit.findOneAndUpdate(
+      { _id: existing._id, providerId: req.providerId },
+      {
+        $set: {
+          consentStatus: "WITHDRAWN",
+          status: nextStatus,
+          patientSummary: "Consent removed — consultation conducted without AI recording or SOAP notes.",
+        },
+        $unset: {
+          transcript: 1,
+          soapDraft: 1,
+          soapFinal: 1,
+        },
+      },
+      { new: true }
+    ).populate("patientId", "-passwordHash");
 
     await AuditLog.create({
       providerId: req.providerId,
       visitId: visitIdStr,
       patientName: patientLabel,
       action: "CONSENT_WITHDRAWN_PURGED",
-      details: "Patient withdrew consent; clinical transcript and SOAP draft purged",
+      details: "Consent removed; AI recording/SOAP data purged while preserving call & visit history",
     });
 
-    res.json({ purged: true, visitId: visitIdStr });
+    res.json({ purged: true, visit });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -434,6 +466,7 @@ async function handleReview(req, res) {
     const { soapNote, soapFinal, patientSummary, nextAppointment, approve, decision } = req.body;
     const updatedFields = soapFinal || soapNote;
     const isApproved = approve || decision === "APPROVED";
+    const isRejected = decision === "REJECTED";
 
     const visit = await Visit.findOne({
       _id: req.params.id,
@@ -461,6 +494,8 @@ async function handleReview(req, res) {
     }
     if (isApproved) {
       visit.status = "APPROVED";
+    } else if (isRejected) {
+      visit.status = "REJECTED";
     }
 
     await visit.save();
@@ -470,9 +505,11 @@ async function handleReview(req, res) {
       providerId: req.providerId,
       visitId: visit._id.toString(),
       patientName: patientLabel,
-      action: isApproved ? "SOAP_APPROVED" : "SOAP_EDITED",
+      action: isApproved ? "SOAP_APPROVED" : isRejected ? "SOAP_REJECTED" : "SOAP_EDITED",
       details: isApproved
         ? `Provider approved SOAP note for ${patientLabel}`
+        : isRejected
+        ? `Provider rejected SOAP draft for ${patientLabel}`
         : `Provider edited SOAP draft for ${patientLabel}`,
     });
 

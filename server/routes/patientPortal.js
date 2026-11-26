@@ -17,7 +17,6 @@ router.get("/dashboard", async (req, res) => {
 
     const visits = await Visit.find({
       patientId: req.patientId,
-      consentStatus: { $ne: "WITHDRAWN" },
     })
       .populate("providerId", "name specialty email")
       .sort({ createdAt: -1 });
@@ -38,15 +37,17 @@ router.get("/dashboard", async (req, res) => {
           : [],
       summary:
         v.patientSummary ||
-        (v.status === "APPROVED"
+        (v.consentStatus === "WITHDRAWN"
+          ? "Consent removed — consultation conducted without AI recording or SOAP notes."
+          : v.status === "APPROVED"
           ? "Consultation approved by your provider."
           : v.status === "DRAFT_READY"
           ? "Consultation completed. Summary is being reviewed by your provider."
           : v.status === "CALL_RINGING"
-          ? "Incoming consultation call from your doctor — answer and approve consent to begin."
+          ? "Incoming consultation call from your doctor — answer to begin."
           : v.status === "IN_CALL"
           ? "Live voice consultation call in progress with your doctor."
-          : "Consultation scheduled — consent active."),
+          : "Consultation scheduled."),
       isSummaryApproved: v.status === "APPROVED",
       nextAppointment: v.nextAppointment || "",
     }));
@@ -111,8 +112,10 @@ router.post("/visits/:id/answer", async (req, res) => {
       return res.status(404).json({ error: "Consultation not found" });
     }
 
-    visit.consentStatus = "GRANTED";
-    visit.consentGrantedAt = new Date();
+    if (visit.consentStatus !== "WITHDRAWN") {
+      visit.consentStatus = "GRANTED";
+      visit.consentGrantedAt = new Date();
+    }
     visit.status = "IN_CALL";
     if (answer) {
       visit.webrtcAnswer = answer;
@@ -124,8 +127,8 @@ router.post("/visits/:id/answer", async (req, res) => {
       providerId: visit.providerId,
       visitId: visit._id.toString(),
       patientName: patientLabel,
-      action: "CONSENT_GRANTED",
-      details: `Patient ${patientLabel} answered live voice call and approved consent`,
+      action: visit.consentStatus === "GRANTED" ? "CONSENT_GRANTED" : "CALL_ANSWERED",
+      details: `Patient ${patientLabel} answered live voice call`,
     });
 
     res.json({ answered: true, visitId: visit._id });
@@ -201,7 +204,12 @@ router.post("/visits/:id/hangup", async (req, res) => {
       return res.status(404).json({ error: "Consultation not found" });
     }
 
-    visit.status = "READY_TO_RECORD";
+    const preservedStatuses = ["APPROVED", "REJECTED", "DRAFT_READY"];
+    visit.status = preservedStatuses.includes(visit.status)
+      ? visit.status
+      : visit.consentStatus === "GRANTED"
+      ? "READY_TO_RECORD"
+      : "CONSENT_REQUIRED";
     visit.webrtcOffer = null;
     visit.webrtcAnswer = null;
     visit.providerIceCandidates = [];
@@ -216,30 +224,49 @@ router.post("/visits/:id/hangup", async (req, res) => {
 
 router.post("/visits/:id/consent/withdraw", async (req, res) => {
   try {
-    const visit = await Visit.findOne({
+    const existing = await Visit.findOne({
       _id: req.params.id,
       patientId: req.patientId,
     }).populate("patientId");
 
-    if (!visit) {
+    if (!existing) {
       return res.status(404).json({ error: "Consultation not found" });
     }
 
-    const visitIdStr = visit._id.toString();
-    const providerId = visit.providerId;
-    const patientLabel = visit.patientId
-      ? `${visit.patientId.name} (${visit.patientId.patientCode})`
+    const visitIdStr = existing._id.toString();
+    const providerId = existing.providerId;
+    const patientLabel = existing.patientId
+      ? `${existing.patientId.name} (${existing.patientId.patientCode})`
       : "Unknown Patient";
 
-    await Visit.deleteOne({ _id: visit._id, patientId: req.patientId });
-    await AuditLog.deleteMany({ visitId: visitIdStr, providerId });
+    // Keep live call (IN_CALL / CALL_RINGING) and visit history intact; purge AI/SOAP fields only
+    const nextStatus =
+      existing.status === "IN_CALL" || existing.status === "CALL_RINGING"
+        ? existing.status
+        : "CONSENT_REQUIRED";
+
+    await Visit.findOneAndUpdate(
+      { _id: existing._id, patientId: req.patientId },
+      {
+        $set: {
+          consentStatus: "WITHDRAWN",
+          status: nextStatus,
+          patientSummary: "Consent removed — consultation conducted without AI recording or SOAP notes.",
+        },
+        $unset: {
+          transcript: 1,
+          soapDraft: 1,
+          soapFinal: 1,
+        },
+      }
+    );
 
     await AuditLog.create({
       providerId,
       visitId: visitIdStr,
       patientName: patientLabel,
       action: "CONSENT_WITHDRAWN_PURGED",
-      details: `Patient ${patientLabel} withdrew consent from Patient Portal; data purged`,
+      details: `Patient ${patientLabel} removed consent; AI recording/SOAP data purged while call & history preserved`,
     });
 
     res.json({ purged: true, visitId: visitIdStr });
