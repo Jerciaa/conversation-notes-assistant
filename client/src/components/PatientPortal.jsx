@@ -1,9 +1,22 @@
-import { useEffect, useState, useRef } from "react";
-import { apiRequest } from "../api";
+import { useState, useEffect, useRef } from "react";
+import { apiRequest, uploadAudioRequest } from "../api";
+
+const VISIT_TYPES = [
+  "Primary Care Follow-up",
+  "New Patient Intake",
+  "Mental Health Check-in",
+  "Urgent Acute Visit",
+];
 
 const ICE_SERVERS = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
+
+function formatAvailabilityLabel(status) {
+  if (status === "BUSY") return "Busy — Call Later";
+  if (status === "REQUEST_CALLBACK") return "Requesting Callback";
+  return "Available Now";
+}
 
 function formatDateTime(value) {
   if (!value) return "";
@@ -13,42 +26,141 @@ function formatDateTime(value) {
   });
 }
 
-export default function PatientPortal({ token, patient, onLogout }) {
-  const [data, setData] = useState({ patient: patient || {}, callLogs: [], appointments: [] });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [statusMessage, setStatusMessage] = useState("");
-  const [callConnected, setCallConnected] = useState(false);
+export default function ConsultationRoom({ token }) {
+  const [patients, setPatients] = useState([]);
+  const [visits, setVisits] = useState([]);
+  const [selectedPatientId, setSelectedPatientId] = useState("");
+  const [visitType, setVisitType] = useState(VISIT_TYPES[0]);
+  const [activeVisitId, setActiveVisitId] = useState("");
 
-  const [availabilityStatus, setAvailabilityStatus] = useState(
-    patient?.availabilityStatus || "AVAILABLE_NOW"
-  );
-  const [availabilityNote, setAvailabilityNote] = useState(
-    patient?.availabilityNote || ""
-  );
-  const [savingAvailability, setSavingAvailability] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [callConnected, setCallConnected] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const [soapForm, setSoapForm] = useState({
+    subjective: "",
+    objective: "",
+    assessment: "",
+    plan: "",
+    patientSummary: "",
+    nextAppointment: "",
+  });
+
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const timerRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const peerRef = useRef(null);
   const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
-  const appliedProviderIceCountRef = useRef(0);
+  const audioCtxRef = useRef(null);
+  const mergerRef = useRef(null);
+  const remoteConnectedToMixerRef = useRef(false);
+  const answerAppliedRef = useRef(false);
+  const appliedPatientIceCountRef = useRef(0);
+  const autoCaptureStartedRef = useRef(false);
 
-  async function loadPortal(silent = false) {
-    if (!silent) setLoading(true);
+  useEffect(() => {
+    loadInitialData(false);
+    const interval = setInterval(() => {
+      loadInitialData(true);
+    }, 2500);
+    return () => {
+      clearInterval(interval);
+      if (timerRef.current) clearInterval(timerRef.current);
+      cleanupCallResources();
+    };
+  }, [token]);
+
+  async function loadInitialData(silent = false) {
     try {
-      const res = await apiRequest("/api/patient-portal/dashboard", {}, token);
-      setData(res);
-      if (!silent && res.patient) {
-        setAvailabilityStatus(res.patient.availabilityStatus || "AVAILABLE_NOW");
-        setAvailabilityNote(res.patient.availabilityNote || "");
+      const [pData, vData] = await Promise.all([
+        apiRequest("/api/visits/patients", {}, token),
+        apiRequest("/api/visits", {}, token),
+      ]);
+      const loadedPatients = pData.patients || [];
+      const loadedVisits = vData.visits || [];
+      setPatients(loadedPatients);
+      setVisits(loadedVisits);
+      if (!silent && loadedPatients.length > 0 && !selectedPatientId) {
+        setSelectedPatientId(loadedPatients[0]._id);
       }
-      setError("");
     } catch (err) {
       if (!silent) setError(err.message);
-    } finally {
-      if (!silent) setLoading(false);
     }
   }
+
+  const activeVisit = visits.find((v) => v._id === activeVisitId) || null;
+
+  function attachRemoteStreamToMixer(stream) {
+    if (!stream || remoteConnectedToMixerRef.current) return;
+    if (audioCtxRef.current && mergerRef.current && stream.getAudioTracks().length > 0) {
+      try {
+        const remoteSource = audioCtxRef.current.createMediaStreamSource(stream);
+        remoteSource.connect(mergerRef.current, 0, 1);
+        remoteConnectedToMixerRef.current = true;
+      } catch (err) {
+        console.error("Failed to attach remote stream to mixer:", err);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!activeVisit) return;
+
+    if (activeVisit.status === "READY_TO_RECORD" && peerRef.current) {
+      cleanupCallResources();
+      setStatusMessage("Call ended. Patient consent remains active.");
+      return;
+    }
+
+    if (!peerRef.current) return;
+
+    async function syncWebRTC() {
+      const pc = peerRef.current;
+      if (!pc) return;
+
+      if (activeVisit.webrtcAnswer && !answerAppliedRef.current) {
+        answerAppliedRef.current = true;
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(activeVisit.webrtcAnswer));
+          setCallConnected(true);
+          setStatusMessage("Live voice call connected! Recording Provider & Patient voices.");
+        } catch (err) {
+          console.error("Failed to set remote answer:", err);
+        }
+      }
+
+      const candidates = activeVisit.patientIceCandidates || [];
+      if (answerAppliedRef.current && candidates.length > appliedPatientIceCountRef.current) {
+        for (let i = appliedPatientIceCountRef.current; i < candidates.length; i += 1) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidates[i]));
+          } catch (err) {
+            console.error("Error adding patient ICE candidate:", err);
+          }
+        }
+        appliedPatientIceCountRef.current = candidates.length;
+      }
+
+      if (
+        activeVisit.status === "IN_CALL" &&
+        activeVisit.consentStatus === "GRANTED" &&
+        !autoCaptureStartedRef.current &&
+        !isRecording
+      ) {
+        autoCaptureStartedRef.current = true;
+        startMixedCallRecording();
+      }
+    }
+
+    syncWebRTC();
+  }, [activeVisit]);
 
   function cleanupCallResources() {
     if (peerRef.current) {
@@ -59,463 +171,832 @@ export default function PatientPortal({ token, patient, onLogout }) {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
-    appliedProviderIceCountRef.current = 0;
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    mergerRef.current = null;
+    remoteConnectedToMixerRef.current = false;
+    remoteStreamRef.current = null;
+    answerAppliedRef.current = false;
+    appliedPatientIceCountRef.current = 0;
+    autoCaptureStartedRef.current = false;
     setCallConnected(false);
   }
 
-  useEffect(() => {
-    loadPortal(false);
-    const interval = setInterval(() => {
-      loadPortal(true);
-    }, 2500);
-    return () => {
-      clearInterval(interval);
-      cleanupCallResources();
-    };
-  }, [token]);
-
-  const profile = data.patient || patient || {};
-  const incomingCalls = data.callLogs.filter(
-    (log) => log.status === "CALL_RINGING" || (log.status === "CONSENT_REQUIRED" && log.consentStatus === "PENDING")
-  );
-  const activeCalls = data.callLogs.filter((log) => log.status === "IN_CALL");
-  const currentActiveCall = activeCalls[0] || null;
-
-  useEffect(() => {
-    if (!currentActiveCall) {
-      if (peerRef.current) cleanupCallResources();
-      return;
+  function selectVisit(visit) {
+    setActiveVisitId(visit?._id || "");
+    setError("");
+    setStatusMessage("");
+    if (visit?.soapFinal || visit?.soapDraft) {
+      const src = visit.soapFinal?.subjective ? visit.soapFinal : visit.soapDraft;
+      setSoapForm({
+        subjective: src?.subjective || "",
+        objective: src?.objective || "",
+        assessment: src?.assessment || "",
+        plan: src?.plan || "",
+        patientSummary: visit.patientSummary || "",
+        nextAppointment: visit.nextAppointment || "",
+      });
+    } else {
+      setSoapForm({
+        subjective: "",
+        objective: "",
+        assessment: "",
+        plan: "",
+        patientSummary: "",
+        nextAppointment: "",
+      });
     }
+  }
 
-    async function syncProviderIce() {
-      const pc = peerRef.current;
-      if (!pc) return;
-      const candidates = currentActiveCall.providerIceCandidates || [];
-      if (candidates.length > appliedProviderIceCountRef.current) {
-        for (let i = appliedProviderIceCountRef.current; i < candidates.length; i += 1) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(candidates[i]));
-          } catch (err) {
-            console.error("Error adding provider ICE candidate:", err);
-          }
-        }
-        appliedProviderIceCountRef.current = candidates.length;
-      }
-    }
-
-    syncProviderIce();
-  }, [currentActiveCall]);
-
-  async function handleSendAvailability(e) {
+  async function handleCreateVisit(e) {
     e.preventDefault();
-    setSavingAvailability(true);
     setError("");
     setStatusMessage("");
     try {
-      const res = await apiRequest(
-        "/api/patient-portal/availability",
+      const data = await apiRequest(
+        "/api/visits",
         {
           method: "POST",
-          body: JSON.stringify({ availabilityStatus, availabilityNote }),
+          body: JSON.stringify({ patientId: selectedPatientId, visitType }),
         },
         token
       );
-      setData((prev) => ({ ...prev, patient: res.patient }));
-      setStatusMessage("Call availability sent to your consultant.");
+      setVisits((prev) => [data.visit, ...prev]);
+      selectVisit(data.visit);
+      setStatusMessage("Session initialized. Click Call Patient Portal to start live two-way voice.");
     } catch (err) {
       setError(err.message);
-    } finally {
-      setSavingAvailability(false);
     }
   }
 
-  async function handleAnswerCall(call) {
+  async function handleStartCall() {
+    if (!activeVisit) return;
     setError("");
-    setStatusMessage("Connecting live audio and approving consent...");
+    setStatusMessage("Requesting microphone access and ringing patient portal...");
     try {
       cleanupCallResources();
-      let answerPayload = null;
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localStreamRef.current = localStream;
 
-      if (call.webrtcOffer) {
-        const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        localStreamRef.current = localStream;
+      const pc = new RTCPeerConnection(ICE_SERVERS);
+      peerRef.current = pc;
 
-        const pc = new RTCPeerConnection(ICE_SERVERS);
-        peerRef.current = pc;
+      localStream.getTracks().forEach((track) => {
+        pc.addTrack(track, localStream);
+      });
 
-        localStream.getTracks().forEach((track) => {
-          pc.addTrack(track, localStream);
-        });
-
-        pc.ontrack = (event) => {
-          const [stream] = event.streams;
-          if (remoteAudioRef.current) {
-            remoteAudioRef.current.srcObject = stream;
-            remoteAudioRef.current.play().catch(() => {});
-          }
-          setCallConnected(true);
-        };
-
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            apiRequest(
-              `/api/patient-portal/visits/${call.id}/call/ice`,
-              {
-                method: "POST",
-                body: JSON.stringify({ candidate: event.candidate.toJSON() }),
-              },
-              token
-            ).catch(() => {});
-          }
-        };
-
-        await pc.setRemoteDescription(new RTCSessionDescription(call.webrtcOffer));
-
-        const initialCandidates = call.providerIceCandidates || [];
-        for (let i = 0; i < initialCandidates.length; i += 1) {
-          await pc.addIceCandidate(new RTCIceCandidate(initialCandidates[i])).catch(() => {});
+      pc.ontrack = (event) => {
+        const [stream] = event.streams;
+        remoteStreamRef.current = stream;
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = stream;
+          remoteAudioRef.current.play().catch(() => {});
         }
-        appliedProviderIceCountRef.current = initialCandidates.length;
+        attachRemoteStreamToMixer(stream);
+      };
 
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        answerPayload = pc.localDescription;
-        setCallConnected(true);
-      }
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          apiRequest(
+            `/api/visits/${activeVisit._id}/call/ice`,
+            {
+              method: "POST",
+              body: JSON.stringify({ candidate: event.candidate.toJSON() }),
+            },
+            token
+          ).catch(() => {});
+        }
+      };
 
-      await apiRequest(
-        `/api/patient-portal/visits/${call.id}/answer`,
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const data = await apiRequest(
+        `/api/visits/${activeVisit._id}/call/start`,
         {
           method: "POST",
-          body: JSON.stringify({ answer: answerPayload }),
+          body: JSON.stringify({ offer: pc.localDescription }),
         },
         token
       );
-      setStatusMessage("Live voice call connected and consent approved. Speak naturally with your consultant.");
-      await loadPortal(true);
+      updateVisitInState(data.visit);
+      setStatusMessage("Ringing patient portal — waiting for patient to pick up...");
     } catch (err) {
       cleanupCallResources();
-      setError("Could not answer call: " + err.message);
+      setError("Could not start call: " + err.message);
     }
   }
 
-  async function handleDeclineCall(visitId) {
+  async function handleCutCallKeepConsent() {
+    if (!activeVisit) return;
     setError("");
-    setStatusMessage("");
     try {
-      cleanupCallResources();
-      await apiRequest(`/api/patient-portal/visits/${visitId}/decline`, { method: "POST" }, token);
-      setStatusMessage("Incoming call declined. Your consultation remains scheduled.");
-      await loadPortal(true);
+      if (mediaRecorderRef.current && isRecording) {
+        mediaRecorderRef.current.stop();
+        setIsRecording(false);
+        if (timerRef.current) clearInterval(timerRef.current);
+      } else {
+        cleanupCallResources();
+        const data = await apiRequest(
+          `/api/visits/${activeVisit._id}/call/hangup`,
+          { method: "POST" },
+          token
+        );
+        updateVisitInState(data.visit);
+        setStatusMessage("Call cut. Patient consent remains granted so you can resume or recall anytime.");
+      }
     } catch (err) {
       setError(err.message);
     }
   }
 
-  async function handleHangUpCall(visitId) {
+  async function handleGrantConsent() {
+    if (!activeVisit) return;
     setError("");
-    setStatusMessage("");
     try {
-      cleanupCallResources();
-      await apiRequest(`/api/patient-portal/visits/${visitId}/hangup`, { method: "POST" }, token);
-      setStatusMessage("Call cut. Your consent remains active.");
-      await loadPortal(true);
+      const data = await apiRequest(
+        `/api/visits/${activeVisit._id}/consent/grant`,
+        { method: "POST" },
+        token
+      );
+      updateVisitInState(data.visit);
+      setStatusMessage("In-room verbal consent recorded. Microphone capture unlocked.");
     } catch (err) {
       setError(err.message);
     }
   }
 
-  async function handleWithdrawConsent(visitId) {
+  async function handleWithdrawConsent() {
+    if (!activeVisit) return;
     const confirmed = window.confirm(
-      "Withdraw consent? This will permanently delete and purge this consultation record."
+      "Withdraw patient consent? This will permanently delete the consultation transcript, SOAP note, and visit data."
     );
     if (!confirmed) return;
 
     setError("");
-    setStatusMessage("");
     try {
       cleanupCallResources();
       await apiRequest(
-        `/api/patient-portal/visits/${visitId}/consent/withdraw`,
+        `/api/visits/${activeVisit._id}/consent/withdraw`,
         { method: "POST" },
         token
       );
-      setStatusMessage("Consent withdrawn and consultation data permanently purged.");
-      await loadPortal(true);
+      setVisits((prev) => prev.filter((v) => v._id !== activeVisit._id));
+      setActiveVisitId("");
+      setStatusMessage("Consent withdrawn. All visit data and transcripts were permanently purged.");
     } catch (err) {
       setError(err.message);
     }
   }
 
+  function updateVisitInState(updated) {
+    setVisits((prev) => prev.map((v) => (v._id === updated._id ? updated : v)));
+    selectVisit(updated);
+  }
+
+  async function startMixedCallRecording() {
+    setError("");
+    try {
+      const localStream =
+        localStreamRef.current || (await navigator.mediaDevices.getUserMedia({ audio: true }));
+      localStreamRef.current = localStream;
+
+      const audioCtx = new AudioContext();
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
+      audioCtxRef.current = audioCtx;
+
+      const merger = audioCtx.createChannelMerger(2);
+      mergerRef.current = merger;
+      const destination = audioCtx.createMediaStreamDestination();
+      destination.channelCount = 2;
+      merger.connect(destination);
+      remoteConnectedToMixerRef.current = false;
+
+      const localSource = audioCtx.createMediaStreamSource(localStream);
+      localSource.connect(merger, 0, 0);
+
+      if (remoteStreamRef.current) {
+        attachRemoteStreamToMixer(remoteStreamRef.current);
+      }
+
+      const recorder = new MediaRecorder(destination.stream);
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        audioChunksRef.current = [];
+        cleanupCallResources();
+        if (activeVisit) {
+          await apiRequest(`/api/visits/${activeVisit._id}/call/end`, { method: "POST" }, token).catch(
+            () => {}
+          );
+        }
+        await processAudioBlob(audioBlob, "live-consultation.webm", true);
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start(500);
+      setIsRecording(true);
+      setRecordingSeconds(0);
+      timerRef.current = setInterval(() => {
+        setRecordingSeconds((s) => s + 1);
+      }, 1000);
+    } catch (err) {
+      setError("Microphone access denied or unavailable. You can upload an audio file instead.");
+    }
+  }
+
+  function stopLiveRecording() {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+  }
+
+  async function handleFileUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processAudioBlob(file, file.name, false);
+    e.target.value = "";
+  }
+
+  async function processAudioBlob(blob, filename, isStereoCall = false) {
+    if (!activeVisit) return;
+    setProcessing(true);
+    setError("");
+    setStatusMessage("Transcribing Provider & Patient voices and drafting SOAP note...");
+    try {
+      const formData = new FormData();
+      formData.append("audio", blob, filename);
+      formData.append("isStereoCall", isStereoCall ? "true" : "false");
+      const data = await uploadAudioRequest(
+        `/api/visits/${activeVisit._id}/process-audio`,
+        formData,
+        token
+      );
+      updateVisitInState(data.visit);
+      const latency = ((data.visit.generationTimeMs || 0) / 1000).toFixed(1);
+      setStatusMessage(
+        data.visit.aiFallbackUsed
+          ? "AI service unavailable — manual clinical SOAP template loaded."
+          : `Grounded SOAP draft & patient summary ready in ${latency}s. Raw audio wiped from memory.`
+      );
+    } catch (err) {
+      setError(err.message);
+      setStatusMessage("");
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+  async function handleReviewDecision(decision) {
+    if (!activeVisit) return;
+    setError("");
+    try {
+      const data = await apiRequest(
+        `/api/visits/${activeVisit._id}/review`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            decision,
+            soapFinal: {
+              subjective: soapForm.subjective,
+              objective: soapForm.objective,
+              assessment: soapForm.assessment,
+              plan: soapForm.plan,
+            },
+            patientSummary: soapForm.patientSummary,
+            nextAppointment: soapForm.nextAppointment,
+          }),
+        },
+        token
+      );
+      updateVisitInState(data.visit);
+      setStatusMessage(
+        decision === "APPROVED"
+          ? "SOAP note signed, archived in database for provider, and summary sent to Patient Portal."
+          : "Draft note rejected and flagged in audit log."
+      );
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleDownloadPatientSoapArchive(patientObj) {
+    if (!patientObj?._id) return;
+    setError("");
+    try {
+      const res = await fetch(`/api/visits/patients/${patientObj._id}/soap-archive`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Could not download SOAP archive file");
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${patientObj.patientCode || "patient"}_approved_soap_notes.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  const consentGranted = activeVisit?.consentStatus === "GRANTED";
+  const selectedPatientObj = patients.find((p) => p._id === selectedPatientId);
+  const livePatientForVisit = activeVisit
+    ? patients.find((p) => p._id === (activeVisit.patientId?._id || activeVisit.patientId)) ||
+      activeVisit.patientId
+    : null;
+
+  const inlineVerifyMatches = activeVisit
+    ? [
+        soapForm.subjective,
+        soapForm.objective,
+        soapForm.assessment,
+        soapForm.plan,
+      ]
+        .join("\n")
+        .match(/[^\n.]*\[VERIFY\][^\n.]*/gi) || []
+    : [];
+
+  const allVerifyAlerts = activeVisit
+    ? Array.from(
+        new Set([
+          ...(activeVisit.soapDraft?.verifyFlags || []),
+          ...inlineVerifyMatches.map((line) => line.trim()),
+        ])
+      )
+    : [];
+
   return (
-    <div className="app-shell">
+    <div className="workspace-grid">
       <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
 
-      <header className="topbar">
-        <div className="brand-area">
-          <strong>Patient Care Portal</strong>
-          <span className="pill pill-blue">{profile.patientCode || "Patient"}</span>
+      <aside className="sidebar-panel">
+        <div className="card">
+          <h2>Start New Consultation</h2>
+          <form onSubmit={handleCreateVisit} className="form-stack">
+            <label>
+              Patient
+              <select
+                value={selectedPatientId}
+                onChange={(e) => setSelectedPatientId(e.target.value)}
+              >
+                {patients.map((p) => (
+                  <option key={p._id} value={p._id}>
+                    {p.patientCode} — {p.name} ({formatAvailabilityLabel(p.availabilityStatus)})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedPatientObj && (
+              <div
+                style={{
+                  padding: "0.65rem 0.75rem",
+                  borderRadius: "6px",
+                  background: "#f8fafc",
+                  border: "1px solid #d0d7de",
+                  fontSize: "0.85rem",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong>Patient Call Status:</strong>
+                  <span
+                    className={`pill ${
+                      selectedPatientObj.availabilityStatus === "BUSY"
+                        ? "pill-blue"
+                        : "pill-green"
+                    }`}
+                  >
+                    {formatAvailabilityLabel(selectedPatientObj.availabilityStatus)}
+                  </span>
+                </div>
+                {selectedPatientObj.availabilityNote && (
+                  <p style={{ marginTop: "0.35rem", marginBottom: "0.5rem" }}>
+                    <strong>Message:</strong> &ldquo;{selectedPatientObj.availabilityNote}&rdquo;
+                  </p>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ width: "100%", marginTop: "0.4rem" }}
+                  onClick={() => handleDownloadPatientSoapArchive(selectedPatientObj)}
+                >
+                  Download Approved SOAP Archive ({selectedPatientObj.patientCode})
+                </button>
+              </div>
+            )}
+
+            <label>
+              Visit Type
+              <select value={visitType} onChange={(e) => setVisitType(e.target.value)}>
+                {VISIT_TYPES.map((vt) => (
+                  <option key={vt} value={vt}>
+                    {vt}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button type="submit" className="btn btn-primary">
+              Create Visit Session
+            </button>
+          </form>
         </div>
 
-        <div className="user-area">
-          <span>
-            {profile.name} ({profile.email})
-          </span>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPortal(false)}>
-            Refresh
-          </button>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onLogout}>
-            Sign Out
-          </button>
+        <div className="card">
+          <h3>Your Consultations ({visits.length})</h3>
+          {visits.length === 0 ? (
+            <p className="muted">No visits yet. Create a session above.</p>
+          ) : (
+            <ul className="visit-list">
+              {visits.map((v) => (
+                <li
+                  key={v._id}
+                  className={`visit-item ${activeVisit?._id === v._id ? "active" : ""}`}
+                  onClick={() => selectVisit(v)}
+                >
+                  <div className="visit-item-top">
+                    <strong>{v.patientId?.name || "Patient"}</strong>
+                    <span className={`status-tag status-${v.status.toLowerCase()}`}>
+                      {v.status.replace(/_/g, " ")}
+                    </span>
+                  </div>
+                  <div className="visit-item-sub">
+                    {v.visitType} • {formatDateTime(v.createdAt)}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
-      </header>
+      </aside>
 
-      <main className="main-container">
+      <section className="main-panel">
         {error && <div className="alert alert-error">{error}</div>}
         {statusMessage && <div className="alert alert-info">{statusMessage}</div>}
 
-        {incomingCalls.map((call) => (
-          <section
-            key={call.id}
-            className="card"
-            style={{
-              border: "2px solid #2563eb",
-              background: "#eff6ff",
-              marginBottom: "1.25rem",
-            }}
-          >
-            <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
-              <span className="pill pill-blue">
-                {call.status === "CALL_RINGING" ? "Incoming Live Voice Call" : "Consent Requested"}
-              </span>
-              <span className="pill pill-green">{formatDateTime(call.date)}</span>
-            </div>
-            <h2 style={{ marginTop: 0 }}>
-              {call.doctorName} ({call.doctorSpecialty}) is calling for your {call.visitType}
-            </h2>
-            <p style={{ marginBottom: "1rem" }}>
-              Answering connects your microphone and speaker for a live consultation call and grants explicit consent for in-memory clinical transcription (zero raw audio is stored).
+        {!activeVisit ? (
+          <div className="card empty-state">
+            <h2>Select or Create a Consultation</h2>
+            <p className="muted">
+              Call the patient on their Patient Portal device to speak live and capture both voices automatically.
             </p>
-            <div className="consent-actions">
-              <button
-                type="button"
-                className="btn btn-success"
-                onClick={() => handleAnswerCall(call)}
-              >
-                Answer Call &amp; Approve Consent
-              </button>
-              {call.status === "CALL_RINGING" && (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => handleDeclineCall(call.id)}
-                >
-                  Decline Call
-                </button>
-              )}
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                onClick={() => handleWithdrawConsent(call.id)}
-              >
-                Withdraw Consent &amp; Purge
-              </button>
-            </div>
-          </section>
-        ))}
-
-        {activeCalls.map((call) => (
-          <section
-            key={call.id}
-            className="card"
-            style={{
-              border: "2px solid #16a34a",
-              background: "#f0fdf4",
-              marginBottom: "1.25rem",
-            }}
-          >
-            <div className="header-split">
-              <div>
-                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                  <span className="pill pill-green">
-                    {callConnected
-                      ? "Connected — Live Two-Way Audio Active"
-                      : "In Call — Consent Active"}
-                  </span>
-                  <span className="pill pill-blue">{formatDateTime(call.date)}</span>
-                </div>
-                <h2 style={{ marginTop: "0.5rem", marginBottom: "0.25rem" }}>
-                  Speaking with {call.doctorName} ({call.doctorSpecialty})
-                </h2>
-                <p className="subtitle" style={{ marginBottom: 0 }}>
-                  Your microphone is live and you can hear your consultant directly through your speakers.
-                </p>
-              </div>
-              <div className="consent-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => handleHangUpCall(call.id)}
-                >
-                  Cut Call (Keep Consent)
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger btn-sm"
-                  onClick={() => handleWithdrawConsent(call.id)}
-                >
-                  Withdraw Consent &amp; Purge
-                </button>
-              </div>
-            </div>
-          </section>
-        ))}
-
-        {loading ? (
-          <div className="card">Loading your care summary and appointments...</div>
+          </div>
         ) : (
-          <div style={{ display: "grid", gap: "1.25rem" }}>
-            <section className="card">
-              <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
-                <span className="pill pill-blue">Call Availability &amp; Messaging</span>
-              </div>
-              <h2 style={{ marginTop: 0 }}>Notify Consultant of Your Call Availability</h2>
-              <form onSubmit={handleSendAvailability} className="form-stack">
-                <label>
-                  Current Call Status
-                  <select
-                    value={availabilityStatus}
-                    onChange={(e) => setAvailabilityStatus(e.target.value)}
-                  >
-                    <option value="AVAILABLE_NOW">Available Now for Call</option>
-                    <option value="BUSY">Currently Busy (Call Later)</option>
-                    <option value="REQUEST_CALLBACK">Requesting Callback</option>
-                  </select>
-                </label>
-                <label>
-                  Message for Consultant
-                  <input
-                    type="text"
-                    placeholder="e.g., Ready to pick up your call now, or free after 4:00 PM"
-                    value={availabilityNote}
-                    onChange={(e) => setAvailabilityNote(e.target.value)}
-                  />
-                </label>
-                <button type="submit" className="btn btn-primary" disabled={savingAvailability}>
-                  {savingAvailability ? "Sending..." : "Send Availability to Consultant"}
-                </button>
-              </form>
-            </section>
-
-            <section className="card">
-              <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
-                <span className="pill pill-green">Upcoming Appointments</span>
-              </div>
-              <h2 style={{ marginTop: 0 }}>Follow-Up Schedule</h2>
-              {data.appointments.length === 0 ? (
-                <p className="subtitle" style={{ marginBottom: 0 }}>
-                  No upcoming follow-up appointments scheduled yet.
-                </p>
-              ) : (
-                <div style={{ display: "grid", gap: "0.75rem" }}>
-                  {data.appointments.map((appt) => (
-                    <div
-                      key={appt.id}
-                      style={{
-                        padding: "0.85rem 1rem",
-                        border: "1px solid #d0d7de",
-                        borderRadius: "8px",
-                        background: "#f8fafc",
-                      }}
-                    >
-                      <strong>{appt.appointmentDetails}</strong>
-                      <div className="subtitle" style={{ marginTop: "0.25rem", marginBottom: 0 }}>
-                        With {appt.doctorName} ({appt.doctorSpecialty}) &bull; {appt.visitType} &bull; Recorded {formatDateTime(appt.recordedOn)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="card">
-              <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
-                <span className="pill pill-blue">Consultation Call Logs &amp; Summaries</span>
-              </div>
-              <h2 style={{ marginTop: 0 }}>Your Visit History</h2>
-              {data.callLogs.length === 0 ? (
-                <p className="subtitle" style={{ marginBottom: 0 }}>
-                  No consultation records found for your account yet.
-                </p>
-              ) : (
-                <div style={{ display: "grid", gap: "1rem" }}>
-                  {data.callLogs.map((log) => (
-                    <div
-                      key={log.id}
-                      style={{
-                        padding: "1rem",
-                        border: "1px solid #d0d7de",
-                        borderRadius: "8px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          flexWrap: "wrap",
-                          gap: "0.5rem",
-                          marginBottom: "0.5rem",
-                        }}
-                      >
-                        <div>
-                          <strong>{log.visitType}</strong> &mdash; {log.doctorName} ({log.doctorSpecialty})
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                          <span className="pill pill-green">
-                            {formatDateTime(log.date)}
-                          </span>
-                          {log.isSummaryApproved && (
-                            <span className="pill pill-blue">Approved by Provider</span>
-                          )}
-                          <button
-                            type="button"
-                            className="btn btn-danger btn-sm"
-                            onClick={() => handleWithdrawConsent(log.id)}
-                          >
-                            Withdraw Consent
-                          </button>
-                        </div>
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop: "0.5rem",
-                          padding: "0.75rem",
-                          borderRadius: "6px",
-                          background: "#f8fafc",
-                          border: "1px solid #e2e8f0",
-                        }}
-                      >
-                        <strong>After-Visit Short Summary:</strong>
-                        <p style={{ marginTop: "0.35rem", marginBottom: 0, lineHeight: 1.5 }}>
-                          {log.summary}
-                        </p>
-                      </div>
-
-                      {log.nextAppointment && (
-                        <div className="subtitle" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
-                          <strong>Next Step / Follow-Up:</strong> {log.nextAppointment}
-                        </div>
+          <>
+            <div className="card">
+              <div className="header-split">
+                <div>
+                  <h2>
+                    {livePatientForVisit?.name} ({livePatientForVisit?.patientCode})
+                  </h2>
+                  <p className="muted">
+                    {activeVisit.visitType} • {livePatientForVisit?.age}y {livePatientForVisit?.gender}
+                  </p>
+                  <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.2rem" }}>
+                    <strong>Session Created:</strong> {formatDateTime(activeVisit.createdAt)}
+                    {activeVisit.callStartedAt && (
+                      <>
+                        {" "}
+                        • <strong>Call Started:</strong> {formatDateTime(activeVisit.callStartedAt)}
+                      </>
+                    )}
+                  </p>
+                  {livePatientForVisit && (
+                    <div style={{ marginTop: "0.4rem" }}>
+                      <span className="pill pill-blue">
+                        Call Status: {formatAvailabilityLabel(livePatientForVisit.availabilityStatus)}
+                      </span>
+                      {livePatientForVisit.availabilityNote && (
+                        <span style={{ marginLeft: "0.5rem", fontSize: "0.9rem" }}>
+                          &ldquo;{livePatientForVisit.availabilityNote}&rdquo;
+                        </span>
                       )}
                     </div>
-                  ))}
+                  )}
+                </div>
+                <div className="consent-actions">
+                  {livePatientForVisit && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => handleDownloadPatientSoapArchive(livePatientForVisit)}
+                    >
+                      Download Approved SOAP File
+                    </button>
+                  )}
+                  {!consentGranted ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={handleStartCall}
+                      >
+                        {activeVisit.status === "CALL_RINGING"
+                          ? "Ringing Patient Portal..."
+                          : "Call Patient Portal (Live Voice)"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={handleGrantConsent}
+                      >
+                        Override: In-Room Verbal Consent
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="pill pill-green">
+                        {callConnected
+                          ? "Live Voice Connected — Consent Granted"
+                          : activeVisit.status === "IN_CALL"
+                          ? "Call Answered — Consent Granted"
+                          : "Consent Granted (Call Ended)"}
+                      </span>
+                      {(activeVisit.status === "IN_CALL" || activeVisit.status === "CALL_RINGING" || isRecording) ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={handleCutCallKeepConsent}
+                        >
+                          Cut Call (Keep Consent)
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          onClick={handleStartCall}
+                        >
+                          Call Again
+                        </button>
+                      )}
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm"
+                    onClick={handleWithdrawConsent}
+                  >
+                    Withdraw Consent &amp; Purge Data
+                  </button>
+                </div>
+              </div>
+
+              <div className="chart-strip">
+                <div>
+                  <strong>History:</strong>{" "}
+                  {(livePatientForVisit?.pastMedicalHistory || []).join(", ") || "None"}
+                </div>
+                <div>
+                  <strong>Medications:</strong>{" "}
+                  {(livePatientForVisit?.activeMedications || []).join(", ") || "None"}
+                </div>
+                <div>
+                  <strong>Allergies:</strong>{" "}
+                  {(livePatientForVisit?.allergies || []).join(", ") || "NKDA"}
+                </div>
+              </div>
+            </div>
+
+            <div className={`card ${!consentGranted ? "locked-panel" : ""}`}>
+              <h3>Two-Way Live Voice &amp; Ambient Capture (Zero Raw Audio Storage)</h3>
+              {!consentGranted ? (
+                <div className="lock-banner">
+                  <strong>Capture Locked — Waiting for Patient Consent:</strong> Click{" "}
+                  <strong>Call Patient Portal (Live Voice)</strong> above so the patient can pick up and start the two-way call.
+                </div>
+              ) : (
+                <div className="capture-controls">
+                  {!isRecording ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={processing}
+                      onClick={startMixedCallRecording}
+                    >
+                      Start Live Call Capture (Both Voices)
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={stopLiveRecording}
+                    >
+                      Cut Call ({recordingSeconds}s) &amp; Generate SOAP + Patient Summary
+                    </button>
+                  )}
+
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="audio/*"
+                    style={{ display: "none" }}
+                    onChange={handleFileUpload}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={processing || isRecording}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Upload Consultation Audio (.mp3/.wav)
+                  </button>
                 </div>
               )}
-            </section>
-          </div>
+              {processing && (
+                <p className="processing-text">
+                  Processing audio in RAM — generating Provider &amp; Patient transcript, SOAP draft, and patient summary...
+                </p>
+              )}
+            </div>
+
+            {activeVisit.transcript && (
+              <div className="card">
+                <div className="header-split">
+                  <h3>Consultation Transcript</h3>
+                  <span className="muted" style={{ fontSize: "0.85rem" }}>
+                    Recorded: {formatDateTime(activeVisit.createdAt)}
+                  </span>
+                </div>
+                <pre className="transcript-box">{activeVisit.transcript}</pre>
+              </div>
+            )}
+
+            {(activeVisit.soapDraft?.subjective || activeVisit.status === "MANUAL_FALLBACK") && (
+              <div className="card">
+                <div className="header-split">
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                      <h3 style={{ margin: 0 }}>Grounded SOAP Note Review &amp; Sign-Off</h3>
+                      {allVerifyAlerts.length > 0 && (
+                        <span
+                          style={{
+                            background: "#dc2626",
+                            color: "#ffffff",
+                            fontWeight: 700,
+                            fontSize: "0.75rem",
+                            padding: "0.2rem 0.6rem",
+                            borderRadius: "999px",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.03em",
+                          }}
+                        >
+                          Needs Verification ({allVerifyAlerts.length})
+                        </span>
+                      )}
+                    </div>
+                    <span className="muted" style={{ fontSize: "0.85rem" }}>
+                      Note Created: {formatDateTime(activeVisit.createdAt)} • Last Updated:{" "}
+                      {formatDateTime(activeVisit.updatedAt)}
+                    </span>
+                  </div>
+                  <span className={`status-tag status-${activeVisit.status.toLowerCase()}`}>
+                    {activeVisit.status.replace(/_/g, " ")}
+                  </span>
+                </div>
+
+                {allVerifyAlerts.length > 0 && (
+                  <div
+                    className="alert alert-error"
+                    style={{
+                      border: "2px solid #dc2626",
+                      background: "#fef2f2",
+                      color: "#991b1b",
+                      marginTop: "0.75rem",
+                      marginBottom: "1rem",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        marginBottom: "0.4rem",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <span
+                        style={{
+                          background: "#dc2626",
+                          color: "#ffffff",
+                          fontWeight: 700,
+                          fontSize: "0.75rem",
+                          padding: "0.2rem 0.55rem",
+                          borderRadius: "999px",
+                          letterSpacing: "0.03em",
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        Hallucination / Verification Alert
+                      </span>
+                      <strong>Clinician Review Required Before Signing</strong>
+                    </div>
+                    <ul style={{ margin: "0.25rem 0 0 1.25rem" }}>
+                      {allVerifyAlerts.map((flag, idx) => (
+                        <li key={idx}>{flag}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="soap-grid">
+                  <label>
+                    Subjective (S)
+                    <textarea
+                      rows={4}
+                      value={soapForm.subjective}
+                      onChange={(e) => setSoapForm({ ...soapForm, subjective: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Objective (O)
+                    <textarea
+                      rows={4}
+                      value={soapForm.objective}
+                      onChange={(e) => setSoapForm({ ...soapForm, objective: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Assessment (A)
+                    <textarea
+                      rows={4}
+                      value={soapForm.assessment}
+                      onChange={(e) => setSoapForm({ ...soapForm, assessment: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Plan (P)
+                    <textarea
+                      rows={4}
+                      value={soapForm.plan}
+                      onChange={(e) => setSoapForm({ ...soapForm, plan: e.target.value })}
+                    />
+                  </label>
+                </div>
+
+                <div className="form-stack" style={{ marginTop: "1rem" }}>
+                  <label>
+                    Patient Portal After-Visit Summary (Plain Language)
+                    <textarea
+                      rows={3}
+                      value={soapForm.patientSummary}
+                      onChange={(e) =>
+                        setSoapForm({ ...soapForm, patientSummary: e.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    Patient Portal Follow-Up / Next Appointment
+                    <input
+                      type="text"
+                      value={soapForm.nextAppointment}
+                      onChange={(e) =>
+                        setSoapForm({ ...soapForm, nextAppointment: e.target.value })
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="review-actions">
+                  <button
+                    type="button"
+                    className="btn btn-success"
+                    onClick={() => handleReviewDecision("APPROVED")}
+                  >
+                    Approve &amp; Sign Note
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    onClick={() => handleReviewDecision("REJECTED")}
+                  >
+                    Reject Draft Note
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
-      </main>
+      </section>
     </div>
   );
 }
