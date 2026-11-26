@@ -463,6 +463,9 @@ export default function PatientPortal({ token, patient, onLogout }) {
                           <span className="pill pill-green">
                             {new Date(log.date).toLocaleDateString()}
                           </span>
+                          {log.isSummaryApproved && (
+                            <span className="pill pill-blue">Approved by Provider</span>
+                          )}
                           <button
                             type="button"
                             className="btn btn-danger btn-sm"
@@ -473,15 +476,23 @@ export default function PatientPortal({ token, patient, onLogout }) {
                         </div>
                       </div>
 
-                      <div style={{ marginTop: "0.5rem" }}>
-                        <strong>After-Visit Summary:</strong>
-                        <p style={{ marginTop: "0.35rem", marginBottom: "0.5rem", lineHeight: 1.5 }}>
+                      <div
+                        style={{
+                          marginTop: "0.5rem",
+                          padding: "0.75rem",
+                          borderRadius: "6px",
+                          background: "#f8fafc",
+                          border: "1px solid #e2e8f0",
+                        }}
+                      >
+                        <strong>After-Visit Short Summary:</strong>
+                        <p style={{ marginTop: "0.35rem", marginBottom: 0, lineHeight: 1.5 }}>
                           {log.summary}
                         </p>
                       </div>
 
                       {log.nextAppointment && (
-                        <div className="subtitle" style={{ marginBottom: 0 }}>
+                        <div className="subtitle" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
                           <strong>Next Step / Follow-Up:</strong> {log.nextAppointment}
                         </div>
                       )}

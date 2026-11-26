@@ -1,4 +1,8 @@
-export async function transcribeAudioBuffer(audioBuffer, mimetype = "audio/mpeg") {
+export async function transcribeAudioBuffer(
+  audioBuffer,
+  mimetype = "audio/mpeg",
+  options = {}
+) {
   const apiKey = process.env.DEEPGRAM_API_KEY;
   if (!apiKey) {
     throw new Error("Missing DEEPGRAM_API_KEY in .env");
@@ -6,18 +10,20 @@ export async function transcribeAudioBuffer(audioBuffer, mimetype = "audio/mpeg"
 
   const contentType =
     mimetype && mimetype.startsWith("audio/") ? mimetype : "audio/mpeg";
+  const isStereoCall = Boolean(options.isStereoCall);
 
-  const response = await fetch(
-    "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&utterances=true&punctuate=true",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${apiKey}`,
-        "Content-Type": contentType,
-      },
-      body: audioBuffer,
-    }
-  );
+  const deepgramUrl = isStereoCall
+    ? "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&multichannel=true&punctuate=true"
+    : "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&utterances=true&punctuate=true";
+
+  const response = await fetch(deepgramUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Token ${apiKey}`,
+      "Content-Type": contentType,
+    },
+    body: audioBuffer,
+  });
 
   if (!response.ok) {
     const errText = await response.text();
@@ -25,7 +31,52 @@ export async function transcribeAudioBuffer(audioBuffer, mimetype = "audio/mpeg"
   }
 
   const data = await response.json();
-  const words = data?.results?.channels?.[0]?.alternatives?.[0]?.words || [];
+  const channels = data?.results?.channels || [];
+
+  if (isStereoCall && channels.length >= 2) {
+    const providerWords = (channels[0]?.alternatives?.[0]?.words || []).map(
+      (w) => ({
+        role: "Provider",
+        start: w.start ?? 0,
+        text: w.punctuated_word || w.word,
+      })
+    );
+    const patientWords = (channels[1]?.alternatives?.[0]?.words || []).map(
+      (w) => ({
+        role: "Patient",
+        start: w.start ?? 0,
+        text: w.punctuated_word || w.word,
+      })
+    );
+
+    const allWords = [...providerWords, ...patientWords].sort(
+      (a, b) => a.start - b.start
+    );
+
+    if (allWords.length > 0) {
+      const lines = [];
+      let currentRole = null;
+      let currentWords = [];
+
+      for (const item of allWords) {
+        if (item.role !== currentRole) {
+          if (currentRole !== null && currentWords.length > 0) {
+            lines.push(`${currentRole}: ${currentWords.join(" ")}`);
+          }
+          currentRole = item.role;
+          currentWords = [item.text];
+        } else {
+          currentWords.push(item.text);
+        }
+      }
+      if (currentRole !== null && currentWords.length > 0) {
+        lines.push(`${currentRole}: ${currentWords.join(" ")}`);
+      }
+      return lines.join("\n");
+    }
+  }
+
+  const words = channels?.[0]?.alternatives?.[0]?.words || [];
   const utterances = data?.results?.utterances || [];
 
   const uniqueWordSpeakers = new Set(
@@ -38,7 +89,7 @@ export async function transcribeAudioBuffer(audioBuffer, mimetype = "audio/mpeg"
     let currentWords = [];
 
     for (const w of words) {
-      const speakerLabel = `Speaker ${(w.speaker ?? 0) + 1}`;
+      const speakerLabel = (w.speaker ?? 0) === 0 ? "Provider" : "Patient";
       if (speakerLabel !== currentSpeaker) {
         if (currentSpeaker !== null && currentWords.length > 0) {
           lines.push(`${currentSpeaker}: ${currentWords.join(" ")}`);
@@ -61,7 +112,7 @@ export async function transcribeAudioBuffer(audioBuffer, mimetype = "audio/mpeg"
     let currentTurn = [];
 
     for (const u of utterances) {
-      const speakerLabel = `Speaker ${(u.speaker ?? 0) + 1}`;
+      const speakerLabel = (u.speaker ?? 0) === 0 ? "Provider" : "Patient";
       if (speakerLabel !== currentSpeaker) {
         if (currentSpeaker !== null) {
           lines.push(`${currentSpeaker}: ${currentTurn.join(" ")}`);
@@ -79,11 +130,11 @@ export async function transcribeAudioBuffer(audioBuffer, mimetype = "audio/mpeg"
   }
 
   const fallbackTranscript =
-    data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+    channels?.[0]?.alternatives?.[0]?.transcript || "";
   if (!fallbackTranscript.trim()) {
     throw new Error("No speech detected in audio capture.");
   }
-  return `Speaker 1: ${fallbackTranscript}`;
+  return `Provider: ${fallbackTranscript}`;
 }
 
 export async function generateSoapNote({ transcript, patient, visitType }) {
@@ -100,12 +151,11 @@ STRICT GROUNDING RULES (R5 & R6):
 2. NEVER invent vitals, lab values, dosages, or diagnoses not explicitly stated in the transcript.
 3. If a detail is ambiguous, inferred, or requires clinician confirmation (e.g., unstated vitals, medication dosage confirmation, allergy cross-check), prefix that sentence with "[VERIFY]" AND add a short explanation to the "verifyFlags" array.
 4. Tailor the structure to the visitType ("${visitType}").
-5. For "patientSummary", write a clear, warm, jargon-free 2-4 sentence summary directly for the patient explaining what was discussed and their care instructions, strictly grounded in the transcript.
-6. For "nextAppointment", extract any follow-up visit timeframe or appointment details mentioned in the transcript (or return "No follow-up appointment scheduled yet").
-7. Return ONLY valid JSON with exact keys:
+5. The transcript uses "Provider:" for the clinician and "Patient:" for the patient.
+6. For "patientSummary", write a clear, warm, jargon-free 2-4 sentence summary directly for the patient explaining what was discussed and their care instructions, strictly grounded in the transcript.
+7. For "nextAppointment", extract any follow-up visit timeframe or appointment details mentioned in the transcript (or return "No follow-up appointment scheduled yet").
+8. Return ONLY valid JSON with exact keys:
 {
-  "speaker1Role": "Provider or Patient",
-  "speaker2Role": "Patient or Provider",
   "subjective": "string",
   "objective": "string",
   "assessment": "string",
@@ -122,7 +172,7 @@ Patient Chart Context:
 - Active Medications: ${(patient.activeMedications || []).join(", ") || "None recorded"}
 - Known Allergies: ${(patient.allergies || []).join(", ") || "NKDA"}
 
-Speaker-Labeled Consultation Transcript:
+Consultation Transcript:
 ${transcript}`;
 
   try {
@@ -159,10 +209,6 @@ ${transcript}`;
     const parsed = JSON.parse(rawContent);
 
     return {
-      speakerMapping: {
-        Speaker1: String(parsed.speaker1Role || "Provider"),
-        Speaker2: String(parsed.speaker2Role || "Patient"),
-      },
       soapDraft: {
         subjective: String(parsed.subjective || "[VERIFY] No subjective details extracted."),
         objective: String(parsed.objective || "[VERIFY] Objective vitals/exam not stated in transcript."),
@@ -191,10 +237,6 @@ export const generateGroundedSoapNote = generateSoapNote;
 
 function buildFallbackSoap(transcript, patient, visitType, reason) {
   return {
-    speakerMapping: {
-      Speaker1: "Provider",
-      Speaker2: "Patient",
-    },
     soapDraft: {
       subjective: `[VERIFY] Automated AI drafting temporarily unavailable (${reason}). Patient ${patient.name} seen for ${visitType}. Review speaker transcript directly.`,
       objective: `[VERIFY] No automated objective findings extracted. Known chart allergies: ${(patient.allergies || []).join(", ") || "None"}.`,

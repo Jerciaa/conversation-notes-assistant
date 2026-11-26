@@ -38,13 +38,16 @@ router.get("/dashboard", async (req, res) => {
           : [],
       summary:
         v.patientSummary ||
-        (v.status === "APPROVED" || v.status === "DRAFT_READY"
-          ? "Consultation completed. Summary is being prepared by your provider."
+        (v.status === "APPROVED"
+          ? "Consultation approved by your provider."
+          : v.status === "DRAFT_READY"
+          ? "Consultation completed. Summary is being reviewed by your provider."
           : v.status === "CALL_RINGING"
           ? "Incoming consultation call from your doctor — answer and approve consent to begin."
           : v.status === "IN_CALL"
           ? "Live voice consultation call in progress with your doctor."
           : "Consultation scheduled — consent active."),
+      isSummaryApproved: v.status === "APPROVED",
       nextAppointment: v.nextAppointment || "",
     }));
 

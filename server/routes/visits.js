@@ -1,6 +1,9 @@
 import express from "express";
 import multer from "multer";
 import bcrypt from "bcryptjs";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { requireAuth } from "../middleware/auth.js";
 import { Patient } from "../models/Patient.js";
 import { Visit } from "../models/Visit.js";
@@ -9,6 +12,10 @@ import {
   transcribeAudioBuffer,
   generateGroundedSoapNote,
 } from "../services/aiService.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const SOAP_ARCHIVE_DIR = path.resolve(__dirname, "../data/soap_archives");
 
 const router = express.Router();
 
@@ -19,10 +26,97 @@ const upload = multer({
 
 router.use(requireAuth);
 
+function getPatientArchivePath(patient) {
+  fs.mkdirSync(SOAP_ARCHIVE_DIR, { recursive: true });
+  const safeCode = (patient.patientCode || patient._id.toString())
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .toUpperCase();
+  return path.join(SOAP_ARCHIVE_DIR, `${safeCode}_approved_soap_notes.txt`);
+}
+
+function appendApprovedSoapToFile(visit) {
+  const patient = visit.patientId;
+  if (!patient) return;
+
+  const filePath = getPatientArchivePath(patient);
+  const soap = visit.soapFinal || visit.soapDraft || {};
+  const timestamp = new Date().toISOString();
+
+  const entry = [
+    "====================================================================",
+    `APPROVED SOAP NOTE | Visit ID: ${visit._id.toString()}`,
+    `Date Approved: ${timestamp}`,
+    `Patient: ${patient.name} (${patient.patientCode || "N/A"})`,
+    `Visit Type: ${visit.visitType}`,
+    "--------------------------------------------------------------------",
+    `SUBJECTIVE (S):\n${soap.subjective || ""}`,
+    "",
+    `OBJECTIVE (O):\n${soap.objective || ""}`,
+    "",
+    `ASSESSMENT (A):\n${soap.assessment || ""}`,
+    "",
+    `PLAN (P):\n${soap.plan || ""}`,
+    "",
+    `AFTER-VISIT SUMMARY:\n${visit.patientSummary || ""}`,
+    "",
+    `NEXT APPOINTMENT:\n${visit.nextAppointment || "No follow-up appointment scheduled yet"}`,
+    "====================================================================",
+    "",
+  ].join("\n");
+
+  if (!fs.existsSync(filePath)) {
+    const header = [
+      `CONFIDENTIAL PROVIDER-ONLY APPROVED SOAP ARCHIVE`,
+      `Patient Name: ${patient.name}`,
+      `Patient Code: ${patient.patientCode || "N/A"}`,
+      "",
+    ].join("\n");
+    fs.writeFileSync(filePath, header + entry, "utf8");
+  } else {
+    fs.appendFileSync(filePath, entry, "utf8");
+  }
+}
+
 router.get("/patients", async (req, res) => {
   try {
     const patients = await Patient.find({}).select("-passwordHash").sort({ patientCode: 1 });
     res.json({ patients });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/patients/:patientId/soap-archive", async (req, res) => {
+  try {
+    const patient = await Patient.findById(req.params.patientId).select("-passwordHash");
+    if (!patient) {
+      return res.status(404).json({ error: "Patient not found" });
+    }
+
+    const filePath = getPatientArchivePath(patient);
+    if (!fs.existsSync(filePath)) {
+      const approvedVisits = await Visit.find({
+        patientId: patient._id,
+        status: "APPROVED",
+      })
+        .populate("patientId", "-passwordHash")
+        .sort({ updatedAt: 1 });
+
+      if (approvedVisits.length === 0) {
+        return res
+          .status(404)
+          .json({ error: "No approved SOAP notes archived for this patient yet." });
+      }
+
+      for (const v of approvedVisits) {
+        appendApprovedSoapToFile(v);
+      }
+    }
+
+    const filename = path.basename(filePath);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.sendFile(filePath);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -289,11 +383,13 @@ router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
       });
     }
 
+    const isStereoCall = req.body.isStereoCall === "true";
     let transcript = req.body.manualTranscript?.trim() || "";
     if (!transcript && req.file) {
       transcript = await transcribeAudioBuffer(
         req.file.buffer,
-        req.file.mimetype
+        req.file.mimetype,
+        { isStereoCall }
       );
     }
     if (!transcript) {
@@ -303,9 +399,9 @@ router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
     }
 
     transcript = transcript
-      .replace(/\bSpeaker\s*0\b/gi, "Speaker 1")
-      .replace(/\bSpeaker\s*1\b/gi, "Speaker 1")
-      .replace(/\bSpeaker\s*2\b/gi, "Speaker 2");
+      .replace(/\bSpeaker\s*0\b/gi, "Provider")
+      .replace(/\bSpeaker\s*1\b/gi, "Provider")
+      .replace(/\bSpeaker\s*2\b/gi, "Patient");
 
     const generated = await generateGroundedSoapNote({
       transcript,
@@ -317,10 +413,6 @@ router.post("/:id/process-audio", upload.single("audio"), async (req, res) => {
     const soapPayload = generated.soapDraft || generated.soapNote || generated;
 
     visit.transcript = transcript;
-    visit.speakerMapping = generated.speakerMapping || {
-      Speaker1: "Provider",
-      Speaker2: "Patient",
-    };
     visit.soapDraft = soapPayload;
     visit.soapFinal = soapPayload;
     visit.patientSummary = generated.patientSummary || "";
@@ -386,6 +478,10 @@ async function handleReview(req, res) {
 
     await visit.save();
 
+    if (isApproved) {
+      appendApprovedSoapToFile(visit);
+    }
+
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
     await AuditLog.create({
       providerId: req.providerId,
@@ -393,7 +489,7 @@ async function handleReview(req, res) {
       patientName: patientLabel,
       action: isApproved ? "SOAP_APPROVED" : "SOAP_EDITED",
       details: isApproved
-        ? `Provider approved SOAP note for ${patientLabel}`
+        ? `Provider approved SOAP note and archived to patient file for ${patientLabel}`
         : `Provider edited SOAP draft for ${patientLabel}`,
     });
 

@@ -51,7 +51,7 @@ export default function ConsultationRoom({ token }) {
   const remoteStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
   const audioCtxRef = useRef(null);
-  const destinationRef = useRef(null);
+  const mergerRef = useRef(null);
   const remoteConnectedToMixerRef = useRef(false);
   const answerAppliedRef = useRef(false);
   const appliedPatientIceCountRef = useRef(0);
@@ -91,10 +91,10 @@ export default function ConsultationRoom({ token }) {
 
   function attachRemoteStreamToMixer(stream) {
     if (!stream || remoteConnectedToMixerRef.current) return;
-    if (audioCtxRef.current && destinationRef.current && stream.getAudioTracks().length > 0) {
+    if (audioCtxRef.current && mergerRef.current && stream.getAudioTracks().length > 0) {
       try {
         const remoteSource = audioCtxRef.current.createMediaStreamSource(stream);
-        remoteSource.connect(destinationRef.current);
+        remoteSource.connect(mergerRef.current, 0, 1);
         remoteConnectedToMixerRef.current = true;
       } catch (err) {
         console.error("Failed to attach remote stream to mixer:", err);
@@ -122,7 +122,7 @@ export default function ConsultationRoom({ token }) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(activeVisit.webrtcAnswer));
           setCallConnected(true);
-          setStatusMessage("Live voice call connected! Recording both Speaker 1 & Speaker 2.");
+          setStatusMessage("Live voice call connected! Recording Provider & Patient voices.");
         } catch (err) {
           console.error("Failed to set remote answer:", err);
         }
@@ -167,7 +167,7 @@ export default function ConsultationRoom({ token }) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
     }
-    destinationRef.current = null;
+    mergerRef.current = null;
     remoteConnectedToMixerRef.current = false;
     remoteStreamRef.current = null;
     answerAppliedRef.current = false;
@@ -360,12 +360,16 @@ export default function ConsultationRoom({ token }) {
         await audioCtx.resume();
       }
       audioCtxRef.current = audioCtx;
+
+      const merger = audioCtx.createChannelMerger(2);
+      mergerRef.current = merger;
       const destination = audioCtx.createMediaStreamDestination();
-      destinationRef.current = destination;
+      destination.channelCount = 2;
+      merger.connect(destination);
       remoteConnectedToMixerRef.current = false;
 
       const localSource = audioCtx.createMediaStreamSource(localStream);
-      localSource.connect(destination);
+      localSource.connect(merger, 0, 0);
 
       if (remoteStreamRef.current) {
         attachRemoteStreamToMixer(remoteStreamRef.current);
@@ -387,7 +391,7 @@ export default function ConsultationRoom({ token }) {
             () => {}
           );
         }
-        await processAudioBlob(audioBlob, "live-consultation.webm");
+        await processAudioBlob(audioBlob, "live-consultation.webm", true);
       };
 
       mediaRecorderRef.current = recorder;
@@ -413,18 +417,19 @@ export default function ConsultationRoom({ token }) {
   async function handleFileUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    await processAudioBlob(file, file.name);
+    await processAudioBlob(file, file.name, false);
     e.target.value = "";
   }
 
-  async function processAudioBlob(blob, filename) {
+  async function processAudioBlob(blob, filename, isStereoCall = false) {
     if (!activeVisit) return;
     setProcessing(true);
     setError("");
-    setStatusMessage("Transcribing Speaker 1 & Speaker 2 and drafting SOAP note...");
+    setStatusMessage("Transcribing Provider & Patient voices and drafting SOAP note...");
     try {
       const formData = new FormData();
       formData.append("audio", blob, filename);
+      formData.append("isStereoCall", isStereoCall ? "true" : "false");
       const data = await uploadAudioRequest(
         `/api/visits/${activeVisit._id}/process-audio`,
         formData,
@@ -470,9 +475,36 @@ export default function ConsultationRoom({ token }) {
       updateVisitInState(data.visit);
       setStatusMessage(
         decision === "APPROVED"
-          ? "SOAP note signed and patient summary published to Patient Portal."
+          ? "SOAP note signed, archived to provider patient file, and summary sent to Patient Portal."
           : "Draft note rejected and flagged in audit log."
       );
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleDownloadPatientSoapArchive(patientObj) {
+    if (!patientObj?._id) return;
+    setError("");
+    try {
+      const res = await fetch(`/api/visits/patients/${patientObj._id}/soap-archive`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Could not download SOAP archive file");
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${patientObj.patientCode || "patient"}_approved_soap_notes.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
     } catch (err) {
       setError(err.message);
     }
@@ -622,6 +654,15 @@ export default function ConsultationRoom({ token }) {
                   )}
                 </div>
                 <div className="consent-actions">
+                  {livePatientForVisit && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => handleDownloadPatientSoapArchive(livePatientForVisit)}
+                    >
+                      Download Approved SOAP File
+                    </button>
+                  )}
                   {!consentGranted ? (
                     <>
                       <button
@@ -742,7 +783,7 @@ export default function ConsultationRoom({ token }) {
               )}
               {processing && (
                 <p className="processing-text">
-                  Processing mixed two-way audio in RAM — generating Speaker 1 &amp; Speaker 2 transcript, SOAP draft, and patient summary...
+                  Processing audio in RAM — generating Provider &amp; Patient transcript, SOAP draft, and patient summary...
                 </p>
               )}
             </div>
@@ -750,13 +791,7 @@ export default function ConsultationRoom({ token }) {
             {activeVisit.transcript && (
               <div className="card">
                 <div className="header-split">
-                  <h3>Speaker-Labeled Transcript (Speaker 1 &amp; Speaker 2)</h3>
-                  {activeVisit.speakerMapping && (
-                    <span className="pill pill-blue">
-                      Speaker 1: {activeVisit.speakerMapping.Speaker1} | Speaker 2:{" "}
-                      {activeVisit.speakerMapping.Speaker2}
-                    </span>
-                  )}
+                  <h3>Consultation Transcript</h3>
                 </div>
                 <pre className="transcript-box">{activeVisit.transcript}</pre>
               </div>
