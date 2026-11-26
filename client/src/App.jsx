@@ -18,9 +18,18 @@ export default function App() {
   }, []);
 
   function handleLogin(newToken, userRole, userProfile) {
+    if (typeof userRole === "object" && userRole !== null) {
+      setToken(newToken);
+      setUser(userRole);
+      setRole(userRole.patientCode ? "patient" : "provider");
+      return;
+    }
+
+    const resolvedRole =
+      userRole === "patient" || userProfile?.patientCode ? "patient" : "provider";
     setToken(newToken);
-    setRole(userRole || "provider");
-    setUser(userProfile);
+    setRole(resolvedRole);
+    setUser(userProfile || null);
   }
 
   function handleLogout() {
@@ -34,7 +43,7 @@ export default function App() {
     return <LoginView onLogin={handleLogin} />;
   }
 
-  if (role === "patient") {
+  if (role === "patient" || user?.patientCode) {
     return <PatientPortal token={token} patient={user} onLogout={handleLogout} />;
   }
 
