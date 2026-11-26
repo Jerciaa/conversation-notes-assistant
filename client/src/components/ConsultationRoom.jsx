@@ -525,6 +525,26 @@ export default function ConsultationRoom({ token }) {
       activeVisit.patientId
     : null;
 
+  const inlineVerifyMatches = activeVisit
+    ? [
+        soapForm.subjective,
+        soapForm.objective,
+        soapForm.assessment,
+        soapForm.plan,
+      ]
+        .join("\n")
+        .match(/[^\n.]*\[VERIFY\][^\n.]*/gi) || []
+    : [];
+
+  const allVerifyAlerts = activeVisit
+    ? Array.from(
+        new Set([
+          ...(activeVisit.soapDraft?.verifyFlags || []),
+          ...inlineVerifyMatches.map((line) => line.trim()),
+        ])
+      )
+    : [];
+
   return (
     <div className="workspace-grid">
       <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
@@ -825,7 +845,25 @@ export default function ConsultationRoom({ token }) {
               <div className="card">
                 <div className="header-split">
                   <div>
-                    <h3>Grounded SOAP Note Review &amp; Sign-Off</h3>
+                    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                      <h3 style={{ margin: 0 }}>Grounded SOAP Note Review &amp; Sign-Off</h3>
+                      {allVerifyAlerts.length > 0 && (
+                        <span
+                          style={{
+                            background: "#dc2626",
+                            color: "#ffffff",
+                            fontWeight: 700,
+                            fontSize: "0.75rem",
+                            padding: "0.2rem 0.6rem",
+                            borderRadius: "999px",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.03em",
+                          }}
+                        >
+                          Needs Verification ({allVerifyAlerts.length})
+                        </span>
+                      )}
+                    </div>
                     <span className="muted" style={{ fontSize: "0.85rem" }}>
                       Note Created: {formatDateTime(activeVisit.createdAt)} • Last Updated:{" "}
                       {formatDateTime(activeVisit.updatedAt)}
@@ -836,11 +874,44 @@ export default function ConsultationRoom({ token }) {
                   </span>
                 </div>
 
-                {activeVisit.soapDraft?.verifyFlags?.length > 0 && (
-                  <div className="verify-box">
-                    <strong>Items Requiring Clinician Verification:</strong>
-                    <ul>
-                      {activeVisit.soapDraft.verifyFlags.map((flag, idx) => (
+                {allVerifyAlerts.length > 0 && (
+                  <div
+                    className="alert alert-error"
+                    style={{
+                      border: "2px solid #dc2626",
+                      background: "#fef2f2",
+                      color: "#991b1b",
+                      marginTop: "0.75rem",
+                      marginBottom: "1rem",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        marginBottom: "0.4rem",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <span
+                        style={{
+                          background: "#dc2626",
+                          color: "#ffffff",
+                          fontWeight: 700,
+                          fontSize: "0.75rem",
+                          padding: "0.2rem 0.55rem",
+                          borderRadius: "999px",
+                          letterSpacing: "0.03em",
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        Hallucination / Verification Alert
+                      </span>
+                      <strong>Clinician Review Required Before Signing</strong>
+                    </div>
+                    <ul style={{ margin: "0.25rem 0 0 1.25rem" }}>
+                      {allVerifyAlerts.map((flag, idx) => (
                         <li key={idx}>{flag}</li>
                       ))}
                     </ul>
