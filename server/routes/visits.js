@@ -1,9 +1,6 @@
 import express from "express";
 import multer from "multer";
 import bcrypt from "bcryptjs";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { requireAuth } from "../middleware/auth.js";
 import { Patient } from "../models/Patient.js";
 import { Visit } from "../models/Visit.js";
@@ -12,10 +9,6 @@ import {
   transcribeAudioBuffer,
   generateGroundedSoapNote,
 } from "../services/aiService.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const SOAP_ARCHIVE_DIR = path.resolve(__dirname, "../data/soap_archives");
 
 const router = express.Router();
 
@@ -26,55 +19,53 @@ const upload = multer({
 
 router.use(requireAuth);
 
-function getPatientArchivePath(patient) {
-  fs.mkdirSync(SOAP_ARCHIVE_DIR, { recursive: true });
-  const safeCode = (patient.patientCode || patient._id.toString())
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .toUpperCase();
-  return path.join(SOAP_ARCHIVE_DIR, `${safeCode}_approved_soap_notes.txt`);
+function formatDateTime(value) {
+  if (!value) return "N/A";
+  return new Date(value).toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
 }
 
-function appendApprovedSoapToFile(visit) {
-  const patient = visit.patientId;
-  if (!patient) return;
-
-  const filePath = getPatientArchivePath(patient);
-  const soap = visit.soapFinal || visit.soapDraft || {};
-  const timestamp = new Date().toISOString();
-
-  const entry = [
-    "====================================================================",
-    `APPROVED SOAP NOTE | Visit ID: ${visit._id.toString()}`,
-    `Date Approved: ${timestamp}`,
-    `Patient: ${patient.name} (${patient.patientCode || "N/A"})`,
-    `Visit Type: ${visit.visitType}`,
-    "--------------------------------------------------------------------",
-    `SUBJECTIVE (S):\n${soap.subjective || ""}`,
-    "",
-    `OBJECTIVE (O):\n${soap.objective || ""}`,
-    "",
-    `ASSESSMENT (A):\n${soap.assessment || ""}`,
-    "",
-    `PLAN (P):\n${soap.plan || ""}`,
-    "",
-    `AFTER-VISIT SUMMARY:\n${visit.patientSummary || ""}`,
-    "",
-    `NEXT APPOINTMENT:\n${visit.nextAppointment || "No follow-up appointment scheduled yet"}`,
-    "====================================================================",
+function buildPatientSoapArchiveText(patient, approvedVisits) {
+  const header = [
+    "CONFIDENTIAL PROVIDER-ONLY APPROVED SOAP ARCHIVE",
+    `Patient Name: ${patient.name}`,
+    `Patient Code: ${patient.patientCode || "N/A"}`,
+    `Total Approved Notes: ${approvedVisits.length}`,
+    `Archive Generated: ${formatDateTime(new Date())}`,
     "",
   ].join("\n");
 
-  if (!fs.existsSync(filePath)) {
-    const header = [
-      `CONFIDENTIAL PROVIDER-ONLY APPROVED SOAP ARCHIVE`,
-      `Patient Name: ${patient.name}`,
-      `Patient Code: ${patient.patientCode || "N/A"}`,
+  const entries = approvedVisits.map((visit) => {
+    const soap = visit.soapFinal || visit.soapDraft || {};
+
+    return [
+      "====================================================================",
+      `APPROVED SOAP NOTE | Visit ID: ${visit._id.toString()}`,
+      `Session Requested: ${formatDateTime(visit.createdAt)}`,
+      `Call Started: ${formatDateTime(visit.callStartedAt)}`,
+      `Date Approved: ${formatDateTime(visit.updatedAt || visit.createdAt)}`,
+      `Patient: ${patient.name} (${patient.patientCode || "N/A"})`,
+      `Visit Type: ${visit.visitType}`,
+      "--------------------------------------------------------------------",
+      `SUBJECTIVE (S):\n${soap.subjective || ""}`,
+      "",
+      `OBJECTIVE (O):\n${soap.objective || ""}`,
+      "",
+      `ASSESSMENT (A):\n${soap.assessment || ""}`,
+      "",
+      `PLAN (P):\n${soap.plan || ""}`,
+      "",
+      `AFTER-VISIT SUMMARY:\n${visit.patientSummary || ""}`,
+      "",
+      `NEXT APPOINTMENT:\n${visit.nextAppointment || "No follow-up appointment scheduled yet"}`,
+      "====================================================================",
       "",
     ].join("\n");
-    fs.writeFileSync(filePath, header + entry, "utf8");
-  } else {
-    fs.appendFileSync(filePath, entry, "utf8");
-  }
+  });
+
+  return header + entries.join("\n");
 }
 
 router.get("/patients", async (req, res) => {
@@ -93,30 +84,26 @@ router.get("/patients/:patientId/soap-archive", async (req, res) => {
       return res.status(404).json({ error: "Patient not found" });
     }
 
-    const filePath = getPatientArchivePath(patient);
-    if (!fs.existsSync(filePath)) {
-      const approvedVisits = await Visit.find({
-        patientId: patient._id,
-        status: "APPROVED",
-      })
-        .populate("patientId", "-passwordHash")
-        .sort({ updatedAt: 1 });
+    const approvedVisits = await Visit.find({
+      patientId: patient._id,
+      status: "APPROVED",
+    }).sort({ createdAt: 1 });
 
-      if (approvedVisits.length === 0) {
-        return res
-          .status(404)
-          .json({ error: "No approved SOAP notes archived for this patient yet." });
-      }
-
-      for (const v of approvedVisits) {
-        appendApprovedSoapToFile(v);
-      }
+    if (approvedVisits.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "No approved SOAP notes found for this patient yet." });
     }
 
-    const filename = path.basename(filePath);
+    const safeCode = (patient.patientCode || patient._id.toString())
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .toUpperCase();
+    const filename = `${safeCode}_approved_soap_notes.txt`;
+    const fileContent = buildPatientSoapArchiveText(patient, approvedVisits);
+
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.sendFile(filePath);
+    res.send(fileContent);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -478,10 +465,6 @@ async function handleReview(req, res) {
 
     await visit.save();
 
-    if (isApproved) {
-      appendApprovedSoapToFile(visit);
-    }
-
     const patientLabel = `${visit.patientId.name} (${visit.patientId.patientCode})`;
     await AuditLog.create({
       providerId: req.providerId,
@@ -489,7 +472,7 @@ async function handleReview(req, res) {
       patientName: patientLabel,
       action: isApproved ? "SOAP_APPROVED" : "SOAP_EDITED",
       details: isApproved
-        ? `Provider approved SOAP note and archived to patient file for ${patientLabel}`
+        ? `Provider approved SOAP note for ${patientLabel}`
         : `Provider edited SOAP draft for ${patientLabel}`,
     });
 

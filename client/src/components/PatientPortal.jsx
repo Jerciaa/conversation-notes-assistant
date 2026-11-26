@@ -5,6 +5,14 @@ const ICE_SERVERS = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
+function formatDateTime(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
 export default function PatientPortal({ token, patient, onLogout }) {
   const [data, setData] = useState({ patient: patient || {}, callLogs: [], appointments: [] });
   const [loading, setLoading] = useState(true);
@@ -280,6 +288,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
               <span className="pill pill-blue">
                 {call.status === "CALL_RINGING" ? "Incoming Live Voice Call" : "Consent Requested"}
               </span>
+              <span className="pill pill-green">{formatDateTime(call.date)}</span>
             </div>
             <h2 style={{ marginTop: 0 }}>
               {call.doctorName} ({call.doctorSpecialty}) is calling for your {call.visitType}
@@ -327,11 +336,14 @@ export default function PatientPortal({ token, patient, onLogout }) {
           >
             <div className="header-split">
               <div>
-                <span className="pill pill-green">
-                  {callConnected
-                    ? "Connected — Live Two-Way Audio Active"
-                    : "In Call — Consent Active"}
-                </span>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <span className="pill pill-green">
+                    {callConnected
+                      ? "Connected — Live Two-Way Audio Active"
+                      : "In Call — Consent Active"}
+                  </span>
+                  <span className="pill pill-blue">{formatDateTime(call.date)}</span>
+                </div>
                 <h2 style={{ marginTop: "0.5rem", marginBottom: "0.25rem" }}>
                   Speaking with {call.doctorName} ({call.doctorSpecialty})
                 </h2>
@@ -418,7 +430,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
                     >
                       <strong>{appt.appointmentDetails}</strong>
                       <div className="subtitle" style={{ marginTop: "0.25rem", marginBottom: 0 }}>
-                        With {appt.doctorName} ({appt.doctorSpecialty}) &bull; {appt.visitType}
+                        With {appt.doctorName} ({appt.doctorSpecialty}) &bull; {appt.visitType} &bull; Recorded {formatDateTime(appt.recordedOn)}
                       </div>
                     </div>
                   ))}
@@ -461,7 +473,7 @@ export default function PatientPortal({ token, patient, onLogout }) {
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                           <span className="pill pill-green">
-                            {new Date(log.date).toLocaleDateString()}
+                            {formatDateTime(log.date)}
                           </span>
                           {log.isSummaryApproved && (
                             <span className="pill pill-blue">Approved by Provider</span>

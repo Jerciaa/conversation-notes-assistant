@@ -18,6 +18,14 @@ function formatAvailabilityLabel(status) {
   return "Available Now";
 }
 
+function formatDateTime(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
 export default function ConsultationRoom({ token }) {
   const [patients, setPatients] = useState([]);
   const [visits, setVisits] = useState([]);
@@ -475,7 +483,7 @@ export default function ConsultationRoom({ token }) {
       updateVisitInState(data.visit);
       setStatusMessage(
         decision === "APPROVED"
-          ? "SOAP note signed, archived to provider patient file, and summary sent to Patient Portal."
+          ? "SOAP note signed, archived in database for provider, and summary sent to Patient Portal."
           : "Draft note rejected and flagged in audit log."
       );
     } catch (err) {
@@ -562,10 +570,18 @@ export default function ConsultationRoom({ token }) {
                   </span>
                 </div>
                 {selectedPatientObj.availabilityNote && (
-                  <p style={{ marginTop: "0.35rem", marginBottom: 0 }}>
+                  <p style={{ marginTop: "0.35rem", marginBottom: "0.5rem" }}>
                     <strong>Message:</strong> &ldquo;{selectedPatientObj.availabilityNote}&rdquo;
                   </p>
                 )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ width: "100%", marginTop: "0.4rem" }}
+                  onClick={() => handleDownloadPatientSoapArchive(selectedPatientObj)}
+                >
+                  Download Approved SOAP Archive ({selectedPatientObj.patientCode})
+                </button>
               </div>
             )}
 
@@ -605,11 +621,7 @@ export default function ConsultationRoom({ token }) {
                     </span>
                   </div>
                   <div className="visit-item-sub">
-                    {v.visitType} •{" "}
-                    {new Date(v.createdAt).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
+                    {v.visitType} • {formatDateTime(v.createdAt)}
                   </div>
                 </li>
               ))}
@@ -639,6 +651,15 @@ export default function ConsultationRoom({ token }) {
                   </h2>
                   <p className="muted">
                     {activeVisit.visitType} • {livePatientForVisit?.age}y {livePatientForVisit?.gender}
+                  </p>
+                  <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.2rem" }}>
+                    <strong>Session Created:</strong> {formatDateTime(activeVisit.createdAt)}
+                    {activeVisit.callStartedAt && (
+                      <>
+                        {" "}
+                        • <strong>Call Started:</strong> {formatDateTime(activeVisit.callStartedAt)}
+                      </>
+                    )}
                   </p>
                   {livePatientForVisit && (
                     <div style={{ marginTop: "0.4rem" }}>
@@ -792,6 +813,9 @@ export default function ConsultationRoom({ token }) {
               <div className="card">
                 <div className="header-split">
                   <h3>Consultation Transcript</h3>
+                  <span className="muted" style={{ fontSize: "0.85rem" }}>
+                    Recorded: {formatDateTime(activeVisit.createdAt)}
+                  </span>
                 </div>
                 <pre className="transcript-box">{activeVisit.transcript}</pre>
               </div>
@@ -800,7 +824,13 @@ export default function ConsultationRoom({ token }) {
             {(activeVisit.soapDraft?.subjective || activeVisit.status === "MANUAL_FALLBACK") && (
               <div className="card">
                 <div className="header-split">
-                  <h3>Grounded SOAP Note Review &amp; Sign-Off</h3>
+                  <div>
+                    <h3>Grounded SOAP Note Review &amp; Sign-Off</h3>
+                    <span className="muted" style={{ fontSize: "0.85rem" }}>
+                      Note Created: {formatDateTime(activeVisit.createdAt)} • Last Updated:{" "}
+                      {formatDateTime(activeVisit.updatedAt)}
+                    </span>
+                  </div>
                   <span className={`status-tag status-${activeVisit.status.toLowerCase()}`}>
                     {activeVisit.status.replace(/_/g, " ")}
                   </span>
